@@ -1,0 +1,10 @@
+{
+  "name": "@e2ee/crypto",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser-side E2EE. Audited library only; no invented crypto.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "tsc -b", "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false" }
+}

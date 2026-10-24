@@ -1,0 +1,12 @@
+// Minimal skeleton. Real E2EE schema (users, devices, prekeys, per-device
+// envelope queue) lands in Phase 1 after the crypto contract freeze.
+// Never add plaintext message bodies or private/session/file keys here.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

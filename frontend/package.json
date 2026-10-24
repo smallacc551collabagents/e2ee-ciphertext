@@ -1,0 +1,6 @@
+{
+  "name": "@e2ee/frontend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Placeholder. Frontend owner scaffolds Next.js + React here (incl. next.config.ts)."
+}
