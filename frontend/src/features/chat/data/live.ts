@@ -5,8 +5,8 @@ import type { BackendHttp, CryptoAdapter, DeviceIdentity, OlmAdapterOptions, Pee
 type Crypto = typeof import("@e2ee/crypto");
 import { chatApi } from "./http";
 import { idbKv } from "./idb";
-import { memoryHistoryStore, type HistoryStore } from "./history";
-import { storeNameFor, wipeLocalE2EE } from "./wipe";
+import type { HistoryStore } from "./history";
+import { onWipe, storeNameFor, wipeLocalE2EE } from "./wipe";
 import { IdentityChangedError, type ChatAdapter, type ConversationView, type MessageView, type SafetyInfo } from "./types";
 import type { ConversationWire, MessageWire } from "./wire";
 
@@ -50,7 +50,7 @@ export function olmOptions(c: Pick<Crypto, "userIdFor" | "createBackendTransport
 /** decrypt -> persist (awaited) -> ack. A message is acked only after its plaintext is stored. */
 export async function processIncoming(
   pending: readonly MessageWire[],
-  d: { receive(m: MessageWire): Promise<ReceiveResult>; history: HistoryStore; ack(ids: string[]): Promise<void>; onView(v: MessageView): void },
+  d: { receive(m: MessageWire): Promise<ReceiveResult>; history: Pick<HistoryStore, "put">; ack(ids: string[]): Promise<void>; onView(v: MessageView): void; display(t: string): string },
 ): Promise<ReceiveResult[]> {
   const results: ReceiveResult[] = [];
   const persisted: string[] = [];
@@ -59,20 +59,23 @@ export async function processIncoming(
     try { r = await d.receive(m); } catch { r = null; }
     if (r) results.push(r);
     if (r?.ok) {
-      try { await d.history.set(m.id, r.plaintext); persisted.push(m.id); } catch { /* not persisted -> not acked; redelivered later */ }
+      try {
+        await d.history.put(m.conversationId, m.seq, { id: m.id, senderUserId: r.sender.userId, senderDeviceId: r.sender.deviceId, text: r.plaintext, sentAt: m.createdAt, clientMsgId: m.clientMsgId });
+        persisted.push(m.id);
+      } catch { /* not persisted -> not acked; redelivered later */ }
     }
-    d.onView({ id: m.id, fromMe: false, text: r?.ok ? r.plaintext : "Unable to decrypt this message", sentAt: m.createdAt, status: "delivered" });
+    d.onView({ id: m.id, fromMe: false, text: r?.ok ? d.display(r.plaintext) : "Unable to decrypt this message", sentAt: m.createdAt, status: "delivered" });
   }
   if (persisted.length) await d.ack(persisted).catch(() => undefined);
   return results;
 }
 
-export function liveAdapter(me: Me, texts: HistoryStore = memoryHistoryStore()): ChatAdapter {
-  const threads = new Map<string, { after?: string; views: MessageView[] }>();
+export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
+  const threads = new Map<string, { after?: string; views: MessageView[]; cache?: Map<string, string> }>();
   const peers = idbKv<StoredPeer>(`${storeNameFor(me.id)}-peers`);
   const convos = new Map<string, ConversationWire>();
   const changed = new Map<string, DeviceIdentity>(); // peer userId -> new published identity
-  let ctx: Promise<{ c: typeof import("@e2ee/crypto"); adapter: CryptoAdapter; verifier: ReturnType<typeof import("@e2ee/crypto").createPeerVerifier> }> | null = null;
+  let ctx: Promise<{ c: typeof import("@e2ee/crypto"); adapter: CryptoAdapter; verifier: ReturnType<typeof import("@e2ee/crypto").createPeerVerifier>; texts: HistoryStore }> | null = null;
 
   const note = (rs: readonly { userId: string; status: string; current?: DeviceIdentity }[]) => {
     for (const r of rs) if (r.status === "changed" && r.current) changed.set(r.userId, r.current);
@@ -85,7 +88,9 @@ export function liveAdapter(me: Me, texts: HistoryStore = memoryHistoryStore()):
       await adapter.sync();
       await adapter.replenishPrekeys((await chatApi.prekeyCount()).oneTimePrekeyCount);
       const verifier = c.createPeerVerifier({ adapter, http, store: peers });
-      return { c, adapter, verifier };
+      const texts = injected ?? (await c.openHistoryStore(storeNameFor(me.id)));
+      onWipe(() => texts.close());
+      return { c, adapter, verifier, texts };
     })();
     ctx.catch(() => { ctx = null; });
     return ctx;
@@ -108,7 +113,7 @@ export function liveAdapter(me: Me, texts: HistoryStore = memoryHistoryStore()):
       return conversations.map((v) => ({ id: v.id, name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }));
     },
     async listMessages(conversationId) {
-      const { adapter, verifier } = await init();
+      const { c, adapter, verifier, texts } = await init();
       const thread = threads.get(conversationId) ?? { views: [] };
       threads.set(conversationId, thread);
       const wire = [];
@@ -122,18 +127,19 @@ export function liveAdapter(me: Me, texts: HistoryStore = memoryHistoryStore()):
       const last = wire.at(-1);
       thread.after = last ? last.seq : after;
       const out: MessageView[] = [];
+      if (!thread.cache) thread.cache = new Map((await texts.list(conversationId)).map((e) => [e.id, e.text]));
+      const cache = thread.cache;
       const pending = [];
       for (const m of wire) {
-        const cached = await texts.get(m.id);
+        const cached = cache.get(m.id);
         if (cached !== undefined || m.senderId === me.id) {
-          out.push({ id: m.id, clientId: m.clientMsgId, fromMe: m.senderId === me.id, text: cached ?? "Sent from another session", sentAt: m.createdAt, status: "sent" });
+          out.push({ id: m.id, clientId: m.clientMsgId, fromMe: m.senderId === me.id, text: cached !== undefined ? c.toDisplayText(cached) : "Sent from another session", sentAt: m.createdAt, status: "sent" });
         } else pending.push(m);
       }
       if (pending.length) {
-        const { decodeMessage } = (await init()).c;
         const results = await processIncoming(pending, {
-          receive: async (m) => (await adapter.receive([decodeMessage(m)]))[0]!,
-          history: texts, ack: (ids) => chatApi.ack(ids).then(() => undefined),
+          receive: async (m) => (await adapter.receive([c.decodeMessage(m)]))[0]!, display: c.toDisplayText,
+          history: { put: async (cid, seq, msg) => { await texts.put(cid, seq, msg); cache.set(msg.id, msg.text); } }, ack: (ids) => chatApi.ack(ids).then(() => undefined),
           onView: (v) => out.push(v),
         });
         note(await verifier.onReceiveResults(results));
@@ -143,7 +149,7 @@ export function liveAdapter(me: Me, texts: HistoryStore = memoryHistoryStore()):
       return thread.views;
     },
     async sendMessage(conversationId, text, clientId) {
-      const { c, adapter } = await init();
+      const { c, adapter, texts } = await init();
       const conv = convos.get(conversationId);
       if (!conv) throw new Error("unknown conversation");
       const peerId = c.userIdFor(peerOf(conv).username);
@@ -163,8 +169,9 @@ export function liveAdapter(me: Me, texts: HistoryStore = memoryHistoryStore()):
         throw e;
       }
       const { message } = await chatApi.sendMessage(conversationId, c.encodeMessage(env, clientId));
-      await texts.set(message.id, text);
-      return { id: message.id, clientId, fromMe: true, text, sentAt: message.createdAt, status: "sent" };
+      await texts.put(conversationId, message.seq, { id: message.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text, sentAt: message.createdAt, clientMsgId: clientId }).catch(() => undefined);
+      threads.get(conversationId)?.cache?.set(message.id, text);
+      return { id: message.id, clientId, fromMe: true, text: c.toDisplayText(text), sentAt: message.createdAt, status: "sent" };
     },
     async safety(conversationId): Promise<SafetyInfo> {
       const { c, adapter } = await init();

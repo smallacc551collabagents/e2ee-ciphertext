@@ -19,13 +19,26 @@ test("decrypt -> persist -> ack: ack never fires before persist; failed persist/
   const log: string[] = [];
   const msg = (id: string) => ({ id, conversationId: "c", senderId: "p", seq: id, clientMsgId: `cid_${id}xxxx`, ciphertext: "AA==", version: 1, createdAt: "2026-10-24T00:00:00Z" });
   await processIncoming([msg("1"), msg("2"), msg("3")], {
-    receive: async (m) => (m.id === "3" ? ({ ok: false } as never) : ({ ok: true, plaintext: `t${m.id}` } as never)),
+    receive: async (m) => (m.id === "3" ? ({ ok: false } as never) : ({ ok: true, plaintext: `t${m.id}`, sender: { userId: "@p:e2ee.local", deviceId: "D" } } as never)),
+    display: (t) => t,
     history: {
-      get: async () => undefined,
-      set: async (id) => { await new Promise((r) => setTimeout(r, 10)); if (id === "2") throw new Error("disk"); log.push(`persist:${id}`); },
+      put: async (_c, _s, { id }) => { await new Promise((r) => setTimeout(r, 10)); if (id === "2") throw new Error("disk"); log.push(`persist:${id}`); },
     },
     ack: async (ids) => { log.push(`ack:${ids.join(",")}`); },
     onView: () => {},
   });
   expect(log).toEqual(["persist:1", "ack:1"]);
+});
+
+import { wipeLocalE2EE } from "../src/features/chat/data/wipe";
+test("wipe calls crypto deleteLocalCryptoState(storeName) per user", async () => {
+  const ls = new Map<string, string>([["e2ee.deviceId.u1", "D"], ["e2ee.deviceId.u2", "E"], ["other", "x"]]);
+  const g = globalThis as Record<string, unknown>;
+  g.localStorage = { get length() { return ls.size; }, key: (i: number) => [...ls.keys()][i] ?? null, removeItem: (k: string) => ls.delete(k) };
+  g.indexedDB = { deleteDatabase: () => { const r: Record<string, () => void> = {}; queueMicrotask(() => r.onsuccess?.()); return r; } };
+  const called: string[] = [];
+  await wipeLocalE2EE(async (s) => { called.push(s); });
+  expect(called.sort()).toEqual(["e2ee-u1", "e2ee-u2"]);
+  expect([...ls.keys()]).toEqual(["other"]);
+  delete g.localStorage; delete g.indexedDB;
 });
