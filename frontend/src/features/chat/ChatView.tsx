@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { chatAdapter, FeatureUnavailableError, type ConversationView, type MessageStatus, type MessageView } from "./data";
+import { chatAdapter, FeatureUnavailableError, IdentityChangedError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
 import { AttachmentError, type Phase } from "./attachments/flow";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
@@ -29,8 +29,10 @@ function LockBadge() {
   );
 }
 
-export function ChatView({ username }: { username: string }) {
-  const adapter = useMemo(() => chatAdapter(), []);
+export function ChatView({ username, userId = "" }: { username: string; userId?: string }) {
+  const adapter = useMemo(() => chatAdapter(userId ? { id: userId, username } : undefined), [userId, username]);
+  const [safety, setSafety] = useState<SafetyInfo | null>(null);
+  const [showInfo, setShowInfo] = useState(false);
   const [convos, setConvos] = useState<Load<ConversationView[]>>({ state: "loading" });
   const [activeId, setActiveId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Load<MessageView[]>>({ state: "loading" });
@@ -45,8 +47,16 @@ export function ChatView({ username }: { username: string }) {
 
   const loadMsgs = useCallback((id: string) => {
     setMsgs({ state: "loading" });
-    adapter.listMessages(id).then((data) => setMsgs({ state: "ready", data }), (e) => setMsgs(toLoad(e)));
+    adapter.listMessages(id).then((data) => setMsgs({ state: "ready", data }), (e) => setMsgs(toLoad(e)))
+      .finally(() => { void adapter.safety?.(id).then(setSafety, () => setSafety(null)); });
   }, [adapter]);
+  useEffect(() => { setSafety(null); setShowInfo(false); }, [activeId]);
+
+  async function acceptIdentity() {
+    if (!activeId || !adapter.acceptNewIdentity) return;
+    await adapter.acceptNewIdentity(activeId);
+    setSafety(await adapter.safety!(activeId));
+  }
   useEffect(() => { if (activeId) loadMsgs(activeId); }, [activeId, loadMsgs]);
   useEffect(() => { listEnd.current?.scrollIntoView?.({ block: "end" }); }, [msgs]);
 
@@ -64,8 +74,9 @@ export function ChatView({ username }: { username: string }) {
       const saved = await adapter.sendMessage(activeId, text, clientId);
       patch(clientId, { ...saved, clientId });
       setConvos((s) => (s.state === "ready" ? { ...s, data: s.data.map((c) => (c.id === activeId ? { ...c, preview: text, lastActivityAt: saved.sentAt } : c)) } : s));
-    } catch {
+    } catch (e) {
       patch(clientId, { status: "failed" });
+      if (e instanceof IdentityChangedError && adapter.safety) setSafety(await adapter.safety(activeId));
     }
   }
 
@@ -172,8 +183,28 @@ export function ChatView({ username }: { username: string }) {
                   <LockBadge />
                 </div>
               </div>
-              <button type="button" disabled aria-label="Conversation menu" className="h-9 w-9 rounded-full text-xl text-slate-500">⋮</button>
+              <button type="button" disabled={!adapter.safety} onClick={() => setShowInfo((v) => !v)} aria-expanded={showInfo} aria-label="Conversation info" className="h-9 w-9 rounded-full text-xl text-slate-500 disabled:opacity-50">ⓘ</button>
             </header>
+            {safety?.changed && (
+              <div role="alert" data-testid="identity-changed" className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
+                <span>Safety number with {active.name} changed. Verify it with them before sending.</span>
+                <span className="flex gap-2">
+                  <button type="button" onClick={() => setShowInfo(true)} className="underline">View safety number</button>
+                  <button type="button" onClick={() => void acceptIdentity()} className="rounded-full bg-amber-600 px-3 py-1 text-white">I’ve verified it</button>
+                </span>
+              </div>
+            )}
+            {showInfo && (
+              <aside aria-label="Conversation info" data-testid="safety-number" className="border-b border-slate-200 bg-white px-4 py-3 text-sm">
+                <p className="font-medium">Safety number</p>
+                {safety?.digits ? (
+                  <p className="mt-1 grid max-w-xs grid-cols-4 gap-x-3 font-mono tracking-wider">{safety.digits.map((d, i) => <span key={i}>{d}</span>)}</p>
+                ) : (
+                  <p className="mt-1 text-slate-500">Available after you exchange a message.</p>
+                )}
+                <p className="mt-2 text-xs text-slate-500">Compare these numbers with {active.name} in person or on a call.</p>
+              </aside>
+            )}
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
               {msgs.state === "loading" && <p aria-busy="true" className="text-center text-sm text-slate-400">Loading messages…</p>}
               {msgs.state === "error" && (
@@ -235,14 +266,14 @@ export function ChatView({ username }: { username: string }) {
                 <>
                   <input ref={fileInput} type="file" className="sr-only" id="attach-file" tabIndex={-1} aria-hidden
                     onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void sendFile(f); }} />
-                  <button type="button" data-testid="attach" aria-label="Attach file" disabled={msgs.state !== "ready" || (!!upload && !upload.error)}
+                  <button type="button" data-testid="attach" aria-label="Attach file" disabled={msgs.state !== "ready" || !!safety?.changed || (!!upload && !upload.error)}
                     onClick={() => fileInput.current?.click()} className="rounded-full px-3 text-lg text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60">📎</button>
                 </>
               )}
               <label htmlFor="composer" className="sr-only">Message</label>
-              <input id="composer" name="text" autoComplete="off" maxLength={4000} placeholder="Write an encrypted message…" disabled={msgs.state !== "ready"}
+              <input id="composer" name="text" autoComplete="off" maxLength={4000} placeholder="Write an encrypted message…" disabled={msgs.state !== "ready" || !!safety?.changed}
                 className="flex-1 rounded-full bg-slate-100 px-4 py-2.5 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60" />
-              <button type="submit" disabled={msgs.state !== "ready"} className="rounded-full bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">Send</button>
+              <button type="submit" disabled={msgs.state !== "ready" || !!safety?.changed} className="rounded-full bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">Send</button>
             </form>
           </>
         )}

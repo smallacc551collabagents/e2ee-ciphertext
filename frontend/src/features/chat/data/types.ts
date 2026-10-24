@@ -27,6 +27,13 @@ export class FeatureUnavailableError extends Error {
   }
 }
 
+/** Sending is blocked until the user re-verifies the peer's new safety number. */
+export class IdentityChangedError extends Error {
+  constructor(public readonly peerId: string) { super("Safety number changed"); }
+}
+
+export interface SafetyInfo { digits: string[] | null; changed: boolean }
+
 export interface ChatAdapter {
   readonly id: string;
   listConversations(): Promise<ConversationView[]>;
@@ -36,4 +43,7 @@ export interface ChatAdapter {
   sendAttachment?(conversationId: string, file: File, clientId: string, onPhase: (p: import("../attachments/flow").Phase, f?: number) => void): Promise<MessageView>;
   openAttachment?(descriptor: unknown, onPhase: (p: import("../attachments/flow").Phase, f?: number) => void): Promise<{ bytes: Uint8Array; name: string; mime: string }>;
   displayText?(s: string): string;
+  /** Optional: safety number + identity-changed state (live adapter only). */
+  safety?(conversationId: string): Promise<SafetyInfo>;
+  acceptNewIdentity?(conversationId: string): Promise<void>;
 }
