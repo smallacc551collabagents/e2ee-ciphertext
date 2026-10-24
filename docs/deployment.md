@@ -1,3 +1,44 @@
 # Deployment
 
-Placeholder.
+## CI (`.github/workflows/ci.yml`)
+Runs on every pull request to `main` and every push to `main`. One `build` job (ubuntu-latest, Node 20, pnpm 9.12.0 with pnpm store cache):
+
+1. `pnpm install --frozen-lockfile`
+2. `pnpm run lint` (`eslint .`, always runs; `no-console` enforced)
+3. `pnpm -r --if-present typecheck`
+4. `pnpm -r --if-present build`
+5. `pnpm -r --if-present test`
+
+Superseded runs on the same ref are cancelled. CI is advisory (no branch protection), per the project's no-approval merge policy.
+
+## CD
+Both deploy workflows run on push to `main` when relevant paths change, and can be run manually (`workflow_dispatch`). Each has a concurrency group, so a newer deploy cancels an older one. **They skip cleanly (notice, green run) until their secrets are set.**
+
+### Frontend → Vercel (`deploy-frontend.yml`)
+Paths: `frontend/**`, `packages/**`, the workflow file, root `package.json` / `pnpm-lock.yaml` / `pnpm-workspace.yaml`.
+Steps (in `frontend/`): `vercel pull --environment=production` → `vercel build --prod` → `vercel deploy --prebuilt --prod`.
+
+Vercel project setup: **Root Directory = `frontend`**, framework Next.js. Link once locally with `vercel link` to get the org/project ids.
+
+### Backend → Render (`deploy-backend.yml`)
+Paths: `backend/**`, `packages/**`, the workflow file, root lockfile/config.
+POSTs the Render **Deploy Hook** URL. (A commented-out alternative using the Render API with `RENDER_API_KEY` + `RENDER_SERVICE_ID` is in the file.)
+
+Render Web Service setup (repo root as root directory, Node 20):
+- Build command: `corepack enable && pnpm install --frozen-lockfile && pnpm --filter @e2ee/backend exec prisma generate && pnpm --filter @e2ee/backend build`
+- Start command: `pnpm --filter @e2ee/backend start` (runs `node dist/server.js`)
+- Health check path: `/healthz` (switch to `/readyz` once ARCH-007 adds the DB check)
+- Turn **Auto-Deploy off** in Render so deploys are driven only by the hook (avoids double deploys).
+
+## GitHub secrets (Settings → Secrets and variables → Actions)
+| Secret | Used by |
+|---|---|
+| `VERCEL_TOKEN` | deploy-frontend |
+| `VERCEL_ORG_ID` | deploy-frontend |
+| `VERCEL_PROJECT_ID` | deploy-frontend |
+| `RENDER_DEPLOY_HOOK_URL` | deploy-backend |
+
+## Runtime environment variables
+Set these in the hosting providers, **never commit them**:
+- Vercel (frontend): `NEXT_PUBLIC_*` values (e.g. API / WebSocket base URL).
+- Render (backend): `DATABASE_URL`, `SESSION_SECRET`, plus anything else in `.env.example`.
