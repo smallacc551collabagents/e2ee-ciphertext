@@ -18,6 +18,7 @@ import {
 } from './contract.js';
 import { withLock } from './lock.js';
 import { getOrCreateStoreKey } from './store-key.js';
+import type { IdentityGate } from './peer-trust.js';
 
 const ALG = 'm.olm.v1.curve25519-aes-sha2' as const;
 const MESSAGE_TYPE = 'org.e2ee.message.v1';
@@ -49,6 +50,8 @@ export interface OlmAdapterOptions {
   readonly transport: KeyServerTransport;
   /** IndexedDB database name prefix for this device's encrypted store. */
   readonly storeName: string;
+  /** Recommended: blocks encrypt() to unverified identity changes (see createIdentityGate). */
+  readonly identityGate?: IdentityGate;
 }
 
 export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoAdapter> {
@@ -115,15 +118,28 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     encrypt: (peer, plaintext) =>
       withLock(lockName, async () => {
         guard();
+        // A pending identity change blocks every device of that user, before any lookup.
+        if (opts.identityGate) await opts.identityGate.assertUserNotPending(peer.userId);
         const cached = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
         if (!cached) {
+          // Unknown device: mark the user dirty so a tracked user is re-queried too.
           await machine.updateTrackedUsers([new M.UserId(peer.userId)]);
+          await machine.receiveSyncChanges('[]', new M.DeviceLists([new M.UserId(peer.userId)]), new Map());
           await flush();
+        }
+        const device = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
+        if (!device) throw new CryptoError('NO_DEVICE', 'Peer device has no published, validly signed bundle');
+        // Gate before claiming, so a blocked peer never costs a one-time prekey.
+        if (opts.identityGate) {
+          await opts.identityGate.assertTrusted({
+            userId: peer.userId,
+            deviceId: peer.deviceId,
+            ed25519: device.ed25519Key?.toBase64() ?? '',
+            curve25519: device.curve25519Key?.toBase64() ?? '',
+          });
         }
         const claim = await machine.getMissingSessions([new M.UserId(peer.userId)]);
         if (claim) await send(claim.id, M.RequestType.KeysClaim, claim.body);
-        const device = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
-        if (!device) throw new CryptoError('NO_DEVICE', 'Peer device has no published, validly signed bundle');
         let content: string;
         try {
           content = await device.encryptToDeviceEvent(MESSAGE_TYPE, { body: plaintext });
@@ -162,6 +178,7 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
           const known = await machine.getDevice(new M.UserId(env.sender.userId), new M.DeviceId(env.sender.deviceId));
           if (!known) {
             await machine.updateTrackedUsers([new M.UserId(env.sender.userId)]);
+            await machine.receiveSyncChanges('[]', new M.DeviceLists([new M.UserId(env.sender.userId)]), new Map());
             await flush();
           }
           const event = { type: 'm.room.encrypted', sender: env.sender.userId, content: env.content };
