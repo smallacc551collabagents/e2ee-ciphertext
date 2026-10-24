@@ -21,7 +21,7 @@ The server checks only that a field is present, is canonical base64, and fits th
 Phase 1 is single-device per user. Multi-device would add a `devices` table and a device id on keys and deliveries, also additively.
 
 ## HTTP contract
-Every route needs the `e2ee_session` cookie, or it returns 401. Errors look like `{ error, message }` and never include stack traces. Binary fields are standard base64 strings.
+Every route needs the `e2ee_session` cookie, or it returns 401. Errors look like `{ error, message }`; failed writes always roll back fully (no partial commit) and never include stack traces. Binary fields are standard base64 strings.
 
 Caps: key or signature ≤ 1024 B; ciphertext ≤ 32 KiB; ≤ 100 one-time prekeys per publish; ≤ 500 unused one-time prekeys per user; `version` is an integer from 1 to 65535.
 
@@ -29,7 +29,7 @@ Caps: key or signature ≤ 1024 B; ciphertext ≤ 32 KiB; ≤ 100 one-time preke
 |---|---|---|
 | `POST /keys/publish` | `{ identityKey?: {publicKey, version}, signedPrekey?: {keyId, publicKey, signature, version}, oneTimePrekeys?: [{keyId, publicKey, version}] }`. The first publish needs identityKey and signedPrekey. Rotating the identity key also needs a new signedPrekey and drops any unused one-time prekeys. signedPrekey can be rotated alone. | `{ oneTimePrekeyCount }`. A reused keyId returns 409; a full pool returns 409. |
 | `GET /keys/count` | none | `{ oneTimePrekeyCount }` |
-| `GET /keys/bundle/:username` | none | `{ userId, username, identityKey{publicKey,version}, signedPrekey{keyId,publicKey,signature,version}, oneTimePrekey{keyId,publicKey,version} \| null }`. Each one-time prekey is consumed atomically (`FOR UPDATE SKIP LOCKED`) and is never handed out twice. Returns 404 if the user has no keys. Limited to 60/min. |
+| `GET /keys/bundle/:username` | none | `{ userId, username, identityKey{publicKey,version}, signedPrekey{keyId,publicKey,signature,version}, oneTimePrekey{keyId,publicKey,version} \| null }`. Each one-time prekey is consumed atomically (`FOR UPDATE SKIP LOCKED`) and is never handed out twice. Returns 404 if the user has no keys. Limited to 60/min per caller and 30/min per target user (429). |
 | `POST /conversations` | `{ username }` | 201 if created, 200 if it already exists: `{ conversation{id, kind, members[{id,username}]} }`. Returns 404 for an unknown user and 400 for yourself. |
 | `GET /conversations` | none | `{ conversations[{id, kind, lastSeq, createdAt, members}] }` |
 | `POST /conversations/:id/messages` | `{ clientMsgId: [A-Za-z0-9_-]{8,64}, ciphertext, version }` | 201 `{ message, duplicate:false }`. A retry with the same clientMsgId returns 200 `{ message, duplicate:true }`. Returns 404 if you are not a member. Limited to 120/min. |

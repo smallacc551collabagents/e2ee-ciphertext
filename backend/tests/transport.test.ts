@@ -168,3 +168,14 @@ test("messages: concurrent duplicate clientMsgId returns duplicate, not 500", as
   const next = await call(alice, "POST", `/conversations/${convId}/messages`, { clientMsgId: "race-msg-0002", ciphertext: b64(50), version: 1 });
   assert.equal(next.json().message.seq, String(Number(first.json().message.seq) + 1), "seq stays gap-free");
 });
+
+test("keys: per-target bundle limit applies across callers", async () => {
+  const dave = await signup("dave");
+  const frank = await signup("frank");
+  assert.equal((await publish(dave, [1])).statusCode, 200);
+  const codes: number[] = [];
+  for (let i = 0; i < 31; i++) codes.push((await call(i % 2 ? alice : frank, "GET", "/keys/bundle/dave")).statusCode);
+  assert.equal(codes.filter((c) => c === 200).length, 30);
+  assert.equal(codes[30], 429, "31st request for the same target is limited regardless of caller");
+  assert.equal((await call(frank, "GET", "/keys/bundle/carol")).statusCode, 200, "other targets unaffected");
+});
