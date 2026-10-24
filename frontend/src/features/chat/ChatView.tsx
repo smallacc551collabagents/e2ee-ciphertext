@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { chatAdapter, FeatureUnavailableError, type ConversationView, type MessageStatus, type MessageView } from "./data";
+import { AttachmentView } from "./attachments/AttachmentView";
+import { AttachmentError, type Phase } from "./attachments/flow";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
 
 const STATUS_LABEL: Record<MessageStatus, string> = {
@@ -64,6 +66,21 @@ export function ChatView({ username }: { username: string }) {
       setConvos((s) => (s.state === "ready" ? { ...s, data: s.data.map((c) => (c.id === activeId ? { ...c, preview: text, lastActivityAt: saved.sentAt } : c)) } : s));
     } catch {
       patch(clientId, { status: "failed" });
+    }
+  }
+
+  const [upload, setUpload] = useState<null | { file: File; phase?: Phase; f?: number; error?: string; retryable?: boolean }>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  async function sendFile(file: File) {
+    if (!activeId || !adapter.sendAttachment) return;
+    setUpload({ file, phase: "encrypting" });
+    try {
+      const saved = await adapter.sendAttachment(activeId, file, crypto.randomUUID(), (phase, f) => setUpload({ file, phase, f }));
+      setMsgs((s) => (s.state === "ready" ? { ...s, data: [...s.data, saved] } : s));
+      setUpload(null);
+    } catch (e) {
+      const ae = e instanceof AttachmentError ? e : null;
+      setUpload({ file, error: ae?.message ?? "Couldn’t send attachment", retryable: ae ? ae.retryable : true });
     }
   }
 
@@ -177,7 +194,9 @@ export function ChatView({ username }: { username: string }) {
                         <div className={`flex ${m.fromMe ? "justify-end" : "justify-start"}`}>
                           <div data-testid="bubble" className={`max-w-[75%] rounded-2xl px-3 py-2 md:max-w-md ${m.fromMe ? "bg-blue-600 text-white" : "bg-white ring-1 ring-slate-200"}`}>
                             {/* Plain text only: React escapes; never dangerouslySetInnerHTML. */}
-                            <p className="whitespace-pre-wrap break-words text-sm">{m.text}</p>
+                            {m.attachment !== undefined && adapter.openAttachment
+                              ? <AttachmentView descriptor={m.attachment} open={adapter.openAttachment} display={adapter.displayText ?? ((t) => t)} />
+                              : <p className="whitespace-pre-wrap break-words text-sm">{m.text}</p>}
                             <p className={`mt-1 text-right text-[11px] ${m.fromMe ? "text-blue-100" : "text-slate-400"}`}>
                               {clockTime(m.sentAt)}
                               {m.fromMe && <> <span data-status={m.status}>{STATUS_LABEL[m.status]}</span></>}
@@ -194,7 +213,32 @@ export function ChatView({ username }: { username: string }) {
                 </ol>
               )}
             </div>
+            {upload && (
+              <div data-testid="upload-status" role={upload.error ? "alert" : "status"} aria-live="polite" className="flex items-center gap-2 border-t border-slate-200 bg-white px-4 py-2 text-sm">
+                <span className="truncate">{(adapter.displayText ?? ((t: string) => t))(upload.file.name)}</span>
+                {upload.error ? (
+                  <>
+                    <span className="text-red-600">{upload.error}</span>
+                    {upload.retryable && <button type="button" onClick={() => void sendFile(upload.file)} className="underline">Retry</button>}
+                    <button type="button" onClick={() => setUpload(null)} className="underline">Dismiss</button>
+                  </>
+                ) : (
+                  <>
+                    <span>{upload.phase === "uploading" ? "Uploading…" : upload.phase === "finalizing" ? "Finishing…" : "Encrypting…"}</span>
+                    <progress max={1} value={upload.phase === "uploading" ? upload.f ?? 0 : undefined} aria-label="Attachment upload progress" />
+                  </>
+                )}
+              </div>
+            )}
             <form onSubmit={onSend} className="flex gap-2 border-t border-slate-200 bg-white px-4 py-3">
+              {adapter.sendAttachment && (
+                <>
+                  <input ref={fileInput} type="file" className="sr-only" id="attach-file" tabIndex={-1} aria-hidden
+                    onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void sendFile(f); }} />
+                  <button type="button" data-testid="attach" aria-label="Attach file" disabled={msgs.state !== "ready" || (!!upload && !upload.error)}
+                    onClick={() => fileInput.current?.click()} className="rounded-full px-3 text-lg text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60">📎</button>
+                </>
+              )}
               <label htmlFor="composer" className="sr-only">Message</label>
               <input id="composer" name="text" autoComplete="off" maxLength={4000} placeholder="Write an encrypted message…" disabled={msgs.state !== "ready"}
                 className="flex-1 rounded-full bg-slate-100 px-4 py-2.5 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60" />

@@ -1,3 +1,4 @@
+import { ATTACHMENT_STORAGE_ORIGIN } from "@/lib/storage-origin";
 import { NextResponse, type NextRequest } from "next/server";
 import { BACKEND_URL, backendAuthHeaders } from "@/lib/backend";
 
@@ -36,9 +37,9 @@ export function buildCsp(nonce: string, dev = process.env.NODE_ENV !== "producti
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval'${dev ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data:",
+    "img-src 'self' data: blob:", // blob: = previews from client-side decrypted attachments only
     "font-src 'self'",
-    `connect-src 'self'${dev ? " ws:" : ""}`,
+    `connect-src 'self' ${ATTACHMENT_STORAGE_ORIGIN}${dev ? " ws:" : ""}`,
     "worker-src 'self' blob:",
     "frame-ancestors 'none'",
     "base-uri 'self'",
