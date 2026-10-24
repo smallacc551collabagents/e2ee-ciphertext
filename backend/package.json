@@ -11,7 +11,11 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "vercel-build": "prisma generate",
-    "prisma:deploy": "prisma migrate deploy"
+    "prisma:deploy": "prisma migrate deploy",
+    "clean": "rm -rf dist .vercel tsconfig.tsbuildinfo",
+    "build:clean": "pnpm run clean && pnpm run prisma:generate && pnpm run build",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:status": "prisma migrate status"
   },
   "dependencies": {
     "@e2ee/shared": "workspace:*",
