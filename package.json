@@ -15,7 +15,9 @@
     "build:clean": "pnpm run clean && pnpm run build",
     "migrate:deploy": "pnpm --filter @e2ee/backend migrate:deploy",
     "migrate:status": "pnpm --filter @e2ee/backend migrate:status",
-    "deploy:backend": "vercel pull --yes --environment=production && vercel build --prod && vercel deploy --prebuilt --prod"
+    "deploy:backend": "vercel pull --yes --environment=production && vercel build --prod && vercel deploy --prebuilt --prod",
+    "gate:crypto": "node tests/security/crypto-prod-gate.mjs && node --test tests/security/crypto-prod-gate.test.mjs",
+    "gate:bundle": "node tests/security/prod-bundle-scan.mjs frontend/.next/static"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.8.0",
