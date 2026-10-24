@@ -10,3 +10,7 @@ coverage/
 .DS_Store
 *.log
 .vercel/
+.next/
+frontend/test-results/
+frontend/playwright-report/
+frontend/next-env.d.ts
