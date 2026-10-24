@@ -21,3 +21,13 @@ Frontend usage: `createOlmAdapter({ userId: userIdFor(username), deviceId, trans
 | keys.claim | `GET /keys/bundle/:username` (PR #13 shape) | yes, exactly one | only when there's no outbound Olm session yet |
 
 Verified peer device keys are cached in the library's encrypted IndexedDB store. Receiving on an existing session makes no key calls, which the tests check.
+
+## Peer identity refresh (E2EE-37)
+
+`createPeerVerifier({ adapter, http, store })` re-reads `GET /keys/identity/:username`:
+- (a) `onReceiveResults(results)`: for each sender with a failed message, once per batch.
+- (b) `refreshStale(peerUserIds)`: on app start and on a timer; re-checks peers last checked ≥ 24h ago.
+
+The published identity is compared with the one stored on first use (`checkPeerIdentity`). The status is `changed` (with `IDENTITY_CHANGED`) when the keys differ, or when the library didn't verify them, for example new keys under a device id we already know. The store is **not** updated. Only `acceptNewIdentity()` updates it, after the user re-verifies the safety number.
+
+Backend dependency: after an identity reset, the new key counter restarts, so `(user_id, key_id)` uniqueness must cover only unused one-time prekeys. Otherwise the reset publish returns 409.

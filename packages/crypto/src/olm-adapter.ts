@@ -205,6 +205,21 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
         await flush();
       }),
 
+    refreshPeer: (userId) =>
+      withLock(lockName, async () => {
+        guard();
+        await machine.updateTrackedUsers([new M.UserId(userId)]);
+        await machine.receiveSyncChanges('[]', new M.DeviceLists([new M.UserId(userId)]), new Map());
+        await flush();
+        const devices = await machine.getUserDevices(new M.UserId(userId));
+        return devices.devices().map((d) => ({
+          userId,
+          deviceId: d.deviceId.toString(),
+          ed25519: d.ed25519Key?.toBase64() ?? '',
+          curve25519: d.curve25519Key?.toBase64() ?? '',
+        }));
+      }),
+
     peerIdentities: async (userId) => {
       guard();
       const devices = await machine.getUserDevices(new M.UserId(userId));
