@@ -1,12 +1,20 @@
-# NOTE: Auto-deploy on push is disabled during the Vercel account migration; run manually via workflow_dispatch. Re-enable the push trigger once hosting move is done.
 # CD: Next.js frontend -> Vercel (production) on push to main.
 # Required GitHub repo secrets:
 #   VERCEL_TOKEN       - Vercel personal/team access token
 #   VERCEL_ORG_ID      - Vercel team/org id (from .vercel/project.json after `vercel link`)
-#   VERCEL_PROJECT_ID  - Vercel project id (project Root Directory = frontend)
+#   VERCEL_PROJECT_ID_FRONTEND - Vercel project id (e2ee-ciphertext-frontend, Root Directory = frontend)
 # If VERCEL_TOKEN is not set, the job skips cleanly instead of failing.
 name: Deploy frontend (Vercel)
 on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "packages/**"
+      - ".github/workflows/deploy-frontend.yml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
   workflow_dispatch:
 concurrency:
   group: deploy-frontend-production
@@ -21,14 +29,10 @@ jobs:
     env:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-    defaults:
-      run:
-        working-directory: frontend
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_FRONTEND }}
     steps:
       - name: Check secrets
         id: guard
-        working-directory: .
         run: |
           if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_ORG_ID" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
             echo "::notice::Vercel secrets not configured; skipping frontend deploy."
@@ -59,3 +63,8 @@ jobs:
       - name: Deploy
         if: steps.guard.outputs.enabled == 'true'
         run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+      - name: Smoke test
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          sleep 5
+          test "$(curl -s -o /dev/null -w '%{http_code}' https://e2ee-ciphertext-frontend.vercel.app/api/auth/me)" = 401
