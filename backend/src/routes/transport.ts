@@ -5,7 +5,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { q, tx, type Queryable } from "../database/db.js";
 import { me, requireAuth } from "../middleware/requireAuth.js";
 import { normalizeUsername, USERNAME_RE } from "../services/auth.js";
-import { windowLimiter } from "../utils/windowLimiter.js";
+import { overLimit } from "../utils/rateLimiter.js";
 
 export const LIMITS = {
   keyBytes: 1024, // any single public key / signature
@@ -16,7 +16,6 @@ export const LIMITS = {
   ackBatch: 500,
   bundlePerTargetPerMin: 30, // caps one-time-prekey draining of a single victim across all callers
 } as const;
-const bundleTargetLimit = windowLimiter(LIMITS.bundlePerTargetPerMin, 60_000);
 
 const b64max = (bytes: number) => Math.ceil(bytes / 3) * 4;
 const B64 = "^[A-Za-z0-9+/]+={0,2}$";
@@ -143,10 +142,12 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
 
   app.get<{ Params: { username: string } }>("/keys/bundle/:username", {
     schema: { params: { type: "object", required: ["username"], properties: { username: { type: "string", pattern: USERNAME_RE } } } },
-    config: { rateLimit: { hook: "preHandler", max: 60, timeWindow: "1 minute", keyGenerator: (r) => `bundle:${r.user?.id ?? r.ip}` } },
+    config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 60, timeWindow: "1 minute", keyGenerator: (r) => `bundle:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
     const target = normalizeUsername(req.params.username);
-    const wait = bundleTargetLimit(target);
+    // E2EE-75: shared store; fails OPEN (logged) so a limiter hiccup never blocks messaging.
+    const wait = await overLimit(`bundle-target:${target}`, LIMITS.bundlePerTargetPerMin, 60_000)
+      .catch((e: Error) => { req.log.error({ err: { name: e.name } }, "rate limiter unavailable (fail-open)"); return 0; });
     if (wait) return reply.code(429).header("retry-after", String(wait))
       .send({ error: "rate_limited", message: "Too many key bundle requests for this user. Try again later." });
     return txReply(reply, async (c) => {
@@ -232,7 +233,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
       body: { type: "object", additionalProperties: false, required: ["clientMsgId", "ciphertext", "version"],
         properties: { clientMsgId: { type: "string", pattern: "^[A-Za-z0-9_-]{8,64}$" }, ciphertext: b64(LIMITS.ciphertextBytes), version } },
     },
-    config: { rateLimit: { hook: "preHandler", max: 120, timeWindow: "1 minute", keyGenerator: (r) => `msg:${r.user?.id ?? r.ip}` } },
+    config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 120, timeWindow: "1 minute", keyGenerator: (r) => `msg:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
     const uid = me(req).id;
     const blob = bytes(req.body.ciphertext, LIMITS.ciphertextBytes);

@@ -6,6 +6,7 @@ import { authRoutes } from "./routes/auth.js";
 import { transportRoutes } from "./routes/transport.js";
 
 import rateLimit from "@fastify/rate-limit";
+import { SharedStore, setRateLimitLogger } from "./utils/rateLimiter.js";
 
 // CORS allowlist: ONLY http://localhost:3000 plus exact origins in CORS_ORIGINS
 // (comma-separated). No wildcard *.vercel.app matching.
@@ -43,8 +44,10 @@ export function buildApp(): FastifyInstance {
   });
   void app.register(cookie);
   // Rate limiting is opt-in per route (global: false); see routes/auth.ts.
-  // In-memory store: resets per serverless cold start — acceptable interim, Redis later.
-  void app.register(rateLimit, { global: false });
+  // E2EE-75: counters live in the shared Postgres store (utils/rateLimiter.ts), so limits
+  // survive cold starts and apply across instances. skipOnError is set per route.
+  setRateLimitLogger((e) => app.log.error({ err: { name: (e as Error)?.name } }, "rate-limit cleanup failed"));
+  void app.register(rateLimit, { global: false, store: SharedStore as never });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err.validation) {

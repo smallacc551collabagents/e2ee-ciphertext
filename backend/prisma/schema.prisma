@@ -149,3 +149,15 @@ model MessageDelivery {
   @@index([recipientId, deliveredAt])
   @@map("message_deliveries")
 }
+
+/// E2EE-75: shared rate-limit state (see backend/src/utils/rateLimiter.ts).
+model RateLimit {
+  key         String     @id
+  count       Int        @default(0)
+  windowStart DateTime   @default(now()) @map("window_start") @db.Timestamptz(3)
+  expiresAt   DateTime   @map("expires_at") @db.Timestamptz(3)
+  hits        DateTime[] @db.Timestamptz(3)
+
+  @@index([expiresAt])
+  @@map("rate_limits")
+}
