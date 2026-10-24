@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { ApiError, signin, signup } from "@/lib/api/client";
+import { safeNext } from "@/lib/safe-next";
 import { credentialsSchema, PASSWORD_MIN } from "@/lib/api/schemas";
 
 type Mode = "login" | "signup";
@@ -31,8 +32,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
     setPending(true);
     try {
       await (isSignup ? signup : signin)(parsed.data);
-      const next = params.get("next");
-      router.replace(next && next.startsWith("/") && !next.startsWith("//") ? next : "/chat");
+      router.replace(safeNext(params.get("next")));
       router.refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong.");

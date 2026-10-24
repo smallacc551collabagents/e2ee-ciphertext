@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export default async function PrivateLayout({ children }: { children: ReactNode }) {
   const user = await getSession();
-  if (!user) redirect("/session/expired");
+  if (!user) redirect("/login") // middleware already cleared any stale cookie;
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b bg-white px-4 py-2">
