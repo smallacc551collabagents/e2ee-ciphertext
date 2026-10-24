@@ -1,9 +1,11 @@
-# CD: Fastify backend -> Render on push to main.
-# Required GitHub repo secret:
-#   RENDER_DEPLOY_HOOK_URL - Render service > Settings > Deploy Hook URL
-# If it is not set, the job skips cleanly instead of failing.
-# Runtime env (DATABASE_URL, SESSION_SECRET, ...) is set in Render, never here.
-name: Deploy backend (Render)
+# CD: backend -> Vercel (production) + Neon migrations on every push to main.
+# Required GitHub repo secrets (names only, values never committed):
+#   DATABASE_URL_DIRECT - Neon DIRECT (non-pooler) URL, used only for prisma migrate deploy
+#   VERCEL_TOKEN        - Vercel account token (Account Settings > Tokens)
+#   VERCEL_ORG_ID       - Vercel team id
+#   VERCEL_PROJECT_ID   - Vercel project id (e2ee-backend, root dir = backend)
+# Runtime env (DATABASE_URL pooler, SESSION_SECRET, ...) lives in Vercel project env.
+name: Deploy backend (Vercel + Neon)
 on:
   push:
     branches: [main]
@@ -17,37 +19,56 @@ on:
   workflow_dispatch:
 concurrency:
   group: deploy-backend-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: production
+    timeout-minutes: 20
     env:
-      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
-      - name: Check secrets
-        id: guard
+      - name: Check required secrets
+        env:
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
         run: |
-          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
-            echo "::notice::RENDER_DEPLOY_HOOK_URL not configured; skipping backend deploy."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Trigger Render deploy hook
-        if: steps.guard.outputs.enabled == 'true'
-        run: curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL" > /dev/null && echo "Render deploy triggered."
-
-      # Alternative (reference): Render API with RENDER_API_KEY + RENDER_SERVICE_ID secrets.
-      # - name: Trigger Render deploy via API
-      #   env:
-      #     RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-      #     RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
-      #   run: |
-      #     curl -fsS -X POST "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys" \
-      #       -H "Authorization: Bearer $RENDER_API_KEY" \
-      #       -H "Content-Type: application/json" \
-      #       -d '{"clearCache":"do_not_clear"}'
+          missing=0
+          for n in DATABASE_URL_DIRECT VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID; do
+            if [ -z "${!n}" ]; then echo "::error::Missing secret $n"; missing=1; fi
+          done
+          exit $missing
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Clean previous build artifacts
+        run: rm -rf .vercel backend/.vercel backend/dist backend/.next packages/*/dist
+      - name: Clean install
+        run: pnpm install --frozen-lockfile
+      - name: Prisma generate
+        run: pnpm --filter @e2ee/backend prisma:generate
+      - name: Typecheck / build backend
+        run: pnpm --filter @e2ee/backend build
+      - name: Migrate Neon (direct endpoint) - fails the deploy on error
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_DIRECT }}
+        run: pnpm --filter @e2ee/backend prisma:deploy
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+      - name: Vercel pull (production env)
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - name: Vercel build (prod)
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+      - name: Vercel deploy (prebuilt, prod)
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+      - name: Smoke test
+        run: |
+          sleep 5
+          curl -fsS https://e2ee-backend.vercel.app/health
