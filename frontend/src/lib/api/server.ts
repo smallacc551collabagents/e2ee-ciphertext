@@ -1,5 +1,5 @@
 import "server-only";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { BACKEND_URL, backendAuthHeaders } from "@/lib/backend";
 import { meResponseSchema, type User } from "./schemas";
 
@@ -10,7 +10,7 @@ export async function getSession(): Promise<User | null> {
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!token) return null;
   const res = await fetch(`${BACKEND_URL}/auth/me`, {
-    headers: { ...backendAuthHeaders(), cookie: `${SESSION_COOKIE}=${token}` },
+    headers: { ...backendAuthHeaders(await headers()), cookie: `${SESSION_COOKIE}=${token}` },
     cache: "no-store",
   }).catch(() => null);
   if (!res?.ok) return null;

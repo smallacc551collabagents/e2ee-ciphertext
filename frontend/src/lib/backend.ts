@@ -1,3 +1,5 @@
+import { clientIp } from "./proxy";
+
 // Server-side backend config, shared by the /api proxy route handler, middleware and RSC
 // session checks. Never import from client components: PROXY_SHARED_SECRET is server-only.
 
@@ -16,7 +18,15 @@ export function proxySecret(): string | null {
 export const isProduction = () => process.env.NODE_ENV === "production";
 
 /** Headers to authenticate a server-to-backend call (ARCH-013 / E2EE-68). */
-export function backendAuthHeaders(): Record<string, string> {
+/**
+ * ARCH-022: pass the real client IP (same derivation as the /api proxy) so the backend can
+ * rate-limit server-side /auth/me calls per client instead of per frontend instance.
+ */
+export function backendAuthHeaders(incoming?: Headers | null, fallbackIp?: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
   const s = proxySecret();
-  return s ? { "x-proxy-secret": s } : {};
+  if (s) out["x-proxy-secret"] = s;
+  const ip = incoming ? clientIp(incoming, fallbackIp) : (fallbackIp ?? null);
+  if (ip) out["x-forwarded-for"] = ip;
+  return out;
 }

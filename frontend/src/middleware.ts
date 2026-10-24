@@ -12,7 +12,7 @@ async function sessionState(req: NextRequest): Promise<SessionState> {
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return "none";
   try {
-    const res = await fetch(`${BACKEND_URL}/auth/me`, { headers: { ...backendAuthHeaders(), cookie: `${SESSION_COOKIE}=${token}` }, cache: "no-store" });
+    const res = await fetch(`${BACKEND_URL}/auth/me`, { headers: { ...backendAuthHeaders(req.headers, (req as unknown as { ip?: string }).ip ?? null), cookie: `${SESSION_COOKIE}=${token}` }, cache: "no-store" });
     if (res.ok) return "valid";
     return res.status === 401 ? "invalid" : "valid"; // transient backend errors: let the layout decide
   } catch {

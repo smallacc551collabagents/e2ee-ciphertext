@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { buildDownstreamHeaders, buildUpstreamHeaders, clientIp, upstreamUrl } from "../src/lib/proxy";
+import { backendAuthHeaders } from "../src/lib/backend";
 
 // Pure unit tests for the /api proxy helpers (no browser, no network).
 test.describe("proxy helpers (unit)", () => {
@@ -62,5 +63,18 @@ test.describe("proxy helpers (unit)", () => {
 
   test("upstream URL strips /api and keeps query", () => {
     expect(upstreamUrl("https://b.example", ["auth", "me"], "?a=1&b=2")).toBe("https://b.example/auth/me?a=1&b=2");
+  });
+});
+
+test.describe("backendAuthHeaders (ARCH-022, unit)", () => {
+  test("server-side /auth/me calls carry the real client IP and our secret only", () => {
+    process.env.PROXY_SHARED_SECRET = "s3cret";
+    const h = backendAuthHeaders(new Headers({ "x-real-ip": "1.2.3.4", "x-forwarded-for": "6.6.6.6", "x-proxy-secret": "attacker" }));
+    expect(h).toEqual({ "x-proxy-secret": "s3cret", "x-forwarded-for": "1.2.3.4" });
+    expect(backendAuthHeaders(new Headers({ "x-forwarded-for": "2.2.2.2, 3.3.3.3" }))["x-forwarded-for"]).toBe("2.2.2.2");
+    expect(backendAuthHeaders(new Headers(), "9.9.9.9")["x-forwarded-for"]).toBe("9.9.9.9");
+    expect("x-forwarded-for" in backendAuthHeaders(new Headers())).toBe(false);
+    delete process.env.PROXY_SHARED_SECRET;
+    expect(backendAuthHeaders(new Headers())).toEqual({});
   });
 });
