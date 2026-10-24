@@ -10,17 +10,21 @@
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "vercel-build": "prisma generate || echo \"prisma: no models yet (schema frozen until Phase 1) - skipping client generation\""
+    "vercel-build": "prisma generate",
+    "prisma:deploy": "prisma migrate deploy"
   },
   "dependencies": {
     "@e2ee/shared": "workspace:*",
+    "@fastify/cookie": "^11.1.3",
+    "@fastify/cors": "^11.3.1",
+    "@node-rs/argon2": "^2.2.2",
     "@prisma/client": "^5.20.0",
     "fastify": "^5.0.0",
-    "pg": "^8"
+    "pg": "^8",
+    "prisma": "5.22.0"
   },
   "devDependencies": {
     "@types/pg": "^8",
-    "prisma": "^5.20.0",
     "tsx": "^4.19.0"
   },
   "engines": {
