@@ -1,3 +1,4 @@
+# NOTE: Auto-deploy on push is disabled during the Vercel account migration; run manually via workflow_dispatch. Re-enable the push trigger once hosting move is done.
 # CD: backend -> Vercel (production) + Neon migrations on every push to main.
 # Required GitHub repo secrets (names only, values never committed):
 #   DATABASE_URL_DIRECT - Neon DIRECT (non-pooler) URL, used only for prisma migrate deploy
@@ -7,15 +8,6 @@
 # Runtime env (DATABASE_URL pooler, SESSION_SECRET, ...) lives in Vercel project env.
 name: Deploy backend (Vercel + Neon)
 on:
-  push:
-    branches: [main]
-    paths:
-      - "backend/**"
-      - "packages/**"
-      - ".github/workflows/deploy-backend.yml"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
   workflow_dispatch:
 concurrency:
   group: deploy-backend-production

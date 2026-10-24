@@ -1,3 +1,4 @@
+# NOTE: Auto-deploy on push is disabled during the Vercel account migration; run manually via workflow_dispatch. Re-enable the push trigger once hosting move is done.
 # CD: Next.js frontend -> Vercel (production) on push to main.
 # Required GitHub repo secrets:
 #   VERCEL_TOKEN       - Vercel personal/team access token
@@ -6,15 +7,6 @@
 # If VERCEL_TOKEN is not set, the job skips cleanly instead of failing.
 name: Deploy frontend (Vercel)
 on:
-  push:
-    branches: [main]
-    paths:
-      - "frontend/**"
-      - "packages/**"
-      - ".github/workflows/deploy-frontend.yml"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
   workflow_dispatch:
 concurrency:
   group: deploy-frontend-production
