@@ -9,15 +9,21 @@
     "typecheck": "tsc -b",
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev"
+    "prisma:migrate": "prisma migrate dev",
+    "vercel-build": "prisma generate || echo \"prisma: no models yet (schema frozen until Phase 1) - skipping client generation\""
   },
   "dependencies": {
     "@e2ee/shared": "workspace:*",
     "@prisma/client": "^5.20.0",
-    "fastify": "^5.0.0"
+    "fastify": "^5.0.0",
+    "pg": "^8"
   },
   "devDependencies": {
+    "@types/pg": "^8",
     "prisma": "^5.20.0",
     "tsx": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
