@@ -6,7 +6,7 @@ import { clientIp } from "./proxy";
 export const BACKEND_URL = (
   process.env.BACKEND_URL ??
   process.env.NEXT_PUBLIC_API_URL ??
-  "https://e2ee-backend.vercel.app"
+  "https://e2ee-ciphertext-backend.vercel.app"
 ).replace(/\/$/, "");
 
 /** Returns the proxy secret, or null if unset. In production an unset secret is an error (fail closed). */
