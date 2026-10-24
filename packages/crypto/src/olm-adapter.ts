@@ -50,11 +50,18 @@ export interface OlmAdapterOptions {
   readonly transport: KeyServerTransport;
   /** IndexedDB database name prefix for this device's encrypted store. */
   readonly storeName: string;
-  /** Recommended: blocks encrypt() to unverified identity changes (see createIdentityGate). */
-  readonly identityGate?: IdentityGate;
+  /**
+   * Required: blocks encrypt() to unverified identity changes (see createIdentityGate).
+   * Enforced at runtime too, so untyped callers can't silently opt out.
+   */
+  readonly identityGate: IdentityGate;
 }
 
 export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoAdapter> {
+  const gate = (opts as Partial<OlmAdapterOptions> | undefined)?.identityGate;
+  if (!gate || typeof gate.assertTrusted !== 'function' || typeof gate.assertUserNotPending !== 'function') {
+    throw new CryptoError('INVALID_OPTIONS', 'createOlmAdapter requires an identityGate (see createIdentityGate)');
+  }
   await initWasm();
   const self: DeviceAddress = { userId: opts.userId, deviceId: opts.deviceId };
   const lockName = `e2ee-crypto:${opts.storeName}`;
@@ -119,7 +126,7 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
       withLock(lockName, async () => {
         guard();
         // A pending identity change blocks every device of that user, before any lookup.
-        if (opts.identityGate) await opts.identityGate.assertUserNotPending(peer.userId);
+        await gate.assertUserNotPending(peer.userId);
         const cached = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
         if (!cached) {
           // Unknown device: mark the user dirty so a tracked user is re-queried too.
@@ -130,8 +137,8 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
         const device = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
         if (!device) throw new CryptoError('NO_DEVICE', 'Peer device has no published, validly signed bundle');
         // Gate before claiming, so a blocked peer never costs a one-time prekey.
-        if (opts.identityGate) {
-          await opts.identityGate.assertTrusted({
+        {
+          await gate.assertTrusted({
             userId: peer.userId,
             deviceId: peer.deviceId,
             ed25519: device.ed25519Key?.toBase64() ?? '',

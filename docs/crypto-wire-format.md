@@ -11,7 +11,7 @@ Backend PR #13 stores `bytes + version`. `version = 1` means (all bytes UTF-8 JS
 
 Client rules: signatures are verified by the library before any session is built; the bridge also rejects a bundle whose device keys name a different user. When `oneTimePrekey` is `null`, the signed prekey is used. Call `adapter.replenishPrekeys(count)` with `GET /keys/count`; the library uploads new keys when the pool is low.
 
-Frontend usage: `createOlmAdapter({ userId: userIdFor(username), deviceId, transport: createBackendTransport(http), storeName })`; send with `POST /conversations/:id/messages` body `encodeMessage(await adapter.encrypt(peer, text))`; receive with `adapter.receive(messages.map(decodeMessage))`. Single device per user, so there is one envelope per recipient. Safety numbers: `safetyNumber(me, peer)`; on first contact store the peer identity, then check it with `checkPeerIdentity` (it throws `IDENTITY_CHANGED`, which drives the banner).
+Frontend usage: `createOlmAdapter({ userId: userIdFor(username), deviceId, transport: createBackendTransport(http), storeName, identityGate: createIdentityGate(peerStore) })` (`identityGate` is required: omitting it is a type error and throws `INVALID_OPTIONS` at runtime); send with `POST /conversations/:id/messages` body `encodeMessage(await adapter.encrypt(peer, text))`; receive with `adapter.receive(messages.map(decodeMessage))`. Single device per user, so there is one envelope per recipient. Safety numbers: `safetyNumber(me, peer)`; on first contact store the peer identity, then check it with `checkPeerIdentity` (it throws `IDENTITY_CHANGED`, which drives the banner).
 
 ## Key lookups
 

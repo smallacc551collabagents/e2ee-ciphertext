@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- test fake mirrors untyped HTTP JSON */
 import 'fake-indexeddb/auto';
+import { memGate } from './mem-gate.js';
 import { describe, expect, it } from 'vitest';
 import { FakeBackend } from './fake-backend.js';
 import {
@@ -12,7 +13,7 @@ async function setup() {
   const be = new FakeBackend();
   const id = ++n;
   const mk = (u: string, dev: string, store = `${u}-bb-${id}`) =>
-    createOlmAdapter({ userId: userIdFor(u), deviceId: dev, transport: createBackendTransport(be.http(u)), storeName: store });
+    createOlmAdapter({ userId: userIdFor(u), deviceId: dev, transport: createBackendTransport(be.http(u)), storeName: store, identityGate: memGate() });
   const alice = await mk('alice', 'ALICE1');
   const bob = await mk('bob', 'BOB1');
   await alice.sync();
