@@ -75,7 +75,12 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     } finally {
       storeKey.fill(0);
     }
-    return M.OlmMachine.initFromStore(new M.UserId(opts.userId), new M.DeviceId(opts.deviceId), handle);
+    try {
+      return await M.OlmMachine.initFromStore(new M.UserId(opts.userId), new M.DeviceId(opts.deviceId), handle);
+    } finally {
+      // The machine holds its own reference to the store; free ours so close() releases the IndexedDB connection.
+      handle.free();
+    }
   });
   let closed = false;
   // Signal an empty fallback-key set once so the library creates a signed

@@ -31,3 +31,29 @@ Verified peer device keys are cached in the library's encrypted IndexedDB store.
 The published identity is compared with the one stored on first use (`checkPeerIdentity`). The status is `changed` (with `IDENTITY_CHANGED`) when the keys differ, or when the library didn't verify them, for example new keys under a device id we already know. The store is **not** updated. Only `acceptNewIdentity()` updates it, after the user re-verifies the safety number.
 
 Backend dependency: after an identity reset, the new key counter restarts, so `(user_id, key_id)` uniqueness must cover only unused one-time prekeys. Otherwise the reset publish returns 409.
+
+## Message history at rest (`historyStore`)
+
+Decrypted history is kept only in the browser, encrypted. Usage for Frontend:
+
+```ts
+import { openHistoryStore, deleteLocalCryptoState } from '@e2ee/crypto';
+
+const history = await openHistoryStore(storeName);          // same storeName as createOlmAdapter
+const cached = await history.list(conversationId);          // render immediately (ascending seq)
+const after = (await history.lastSeq(conversationId)) ?? '0';
+// GET /conversations/:id/messages?after=<after>, then adapter.receive(messages.map(decodeMessage))
+for (const [i, r] of results.entries()) {
+  const m = messages[i];
+  if (r.ok) await history.put(conversationId, m.seq, {
+    id: m.id, senderUserId: r.sender.userId, senderDeviceId: r.sender.deviceId,
+    text: r.plaintext, sentAt: m.createdAt, clientMsgId: m.clientMsgId,
+  });
+}
+// Then POST /messages/ack. Store your own sent messages after the POST returns their seq.
+```
+
+- **Encryption:** each record is AES-256-GCM encrypted with a fresh IV. The key comes from HKDF-SHA-256 over the store's own non-extractable random base key, kept in IndexedDB `<storeName>-history`. The AAD binds `(conversationId, seq)`, so a tampered, moved or replayed record fails with `DECRYPT_FAILED`. Plaintext never appears in IndexedDB.
+- **Cursor:** use `lastSeq(conversationId)` as the `after` cursor so already-decrypted messages are never re-fetched. Olm can't decrypt the same message twice, so history is the only way to re-render past messages after reload.
+- **Clearing:** `clear()` removes all records. On **logout**, close the adapter and history store, then call `deleteLocalCryptoState(storeName)`. It deletes the Olm store, its wrapping key and the history DB together. If another tab has them open, it rejects with `STORAGE_FAILED`.
+- **Rendering:** apply text-only rendering rules to `text` as for live messages.
