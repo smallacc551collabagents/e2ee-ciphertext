@@ -30,6 +30,7 @@ Caps: key or signature ≤ 1024 B; ciphertext ≤ 32 KiB; ≤ 100 one-time preke
 | `POST /keys/publish` | `{ identityKey?: {publicKey, version}, signedPrekey?: {keyId, publicKey, signature, version}, oneTimePrekeys?: [{keyId, publicKey, version}] }`. The first publish needs identityKey and signedPrekey. Rotating the identity key also needs a new signedPrekey and drops any unused one-time prekeys. signedPrekey can be rotated alone. | `{ oneTimePrekeyCount }`. A reused keyId returns 409; a full pool returns 409. |
 | `GET /keys/count` | none | `{ oneTimePrekeyCount }` |
 | `GET /keys/bundle/:username` | none | `{ userId, username, identityKey{publicKey,version}, signedPrekey{keyId,publicKey,signature,version}, oneTimePrekey{keyId,publicKey,version} \| null }`. Each one-time prekey is consumed atomically (`FOR UPDATE SKIP LOCKED`) and is never handed out twice. Returns 404 if the user has no keys. Limited to 60/min per caller and 30/min per target user (429). |
+| `GET /keys/identity/:username` | none | `{ userId, username, identityKey{publicKey,version}, signedPrekey{keyId,publicKey,signature,version} }` — same objects as `/keys/bundle`, no `oneTimePrekey`. Read-only: consumes nothing, safe to call on every receive. 404 if the user has no keys. Limited to 60/min per caller (no per-target limit). |
 | `POST /conversations` | `{ username }` | 201 if created, 200 if it already exists: `{ conversation{id, kind, members[{id,username}]} }`. Returns 404 for an unknown user and 400 for yourself. |
 | `GET /conversations` | none | `{ conversations[{id, kind, lastSeq, createdAt, members}] }` |
 | `POST /conversations/:id/messages` | `{ clientMsgId: [A-Za-z0-9_-]{8,64}, ciphertext, version }` | 201 `{ message, duplicate:false }`. A retry with the same clientMsgId returns 200 `{ message, duplicate:true }`. Returns 404 if you are not a member. Limited to 120/min. |
@@ -37,3 +38,8 @@ Caps: key or signature ≤ 1024 B; ciphertext ≤ 32 KiB; ≤ 100 one-time preke
 | `POST /messages/ack` | `{ messageIds: uuid[] (≤500) }` | `{ acked }`. Only the caller's own delivery rows are updated. Acking twice does nothing. |
 
 Non-members get 404 rather than 403, so the API doesn't reveal which conversations exist.
+
+
+### One-time prekey key IDs
+
+`(user_id, key_id)` is unique only among **unused** one-time prekeys (partial unique index `one_time_prekeys_user_id_key_id_unused_key ... WHERE consumed_at IS NULL`, migration `20261024150000_otk_partial_unique`). Re-uploading a keyId that was already consumed (e.g. after an identity rotation) succeeds; re-uploading a keyId that is still unused returns 409 `prekey_id_conflict`. Replacing the identity key still deletes all unused one-time prekeys.
