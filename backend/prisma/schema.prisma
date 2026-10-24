@@ -85,7 +85,8 @@ model OneTimePrekey {
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, keyId])
+  // Uniqueness of (user_id, key_id) is a PARTIAL index WHERE consumed_at IS NULL (raw SQL
+  // migration 20261024150000_otk_partial_unique); Prisma can't express partial indexes.
   @@index([userId, consumedAt])
   @@map("one_time_prekeys")
 }

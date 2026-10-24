@@ -127,9 +127,9 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
         const r = await c.query(
           `INSERT INTO one_time_prekeys (id, user_id, key_id, public_key, version)
            SELECT gen_random_uuid(), $1, k, p, v FROM unnest($2::int[], $3::bytea[], $4::int[]) AS t(k, p, v)
-           ON CONFLICT (user_id, key_id) DO NOTHING`,
+           ON CONFLICT (user_id, key_id) WHERE consumed_at IS NULL DO NOTHING`,
           [uid, otks.map((k) => k.keyId), otks.map((k) => k.b), otks.map((k) => k.version)]);
-        if ((r.rowCount ?? 0) !== otks.length) throw new ApiError(409, "prekey_id_conflict", "One-time prekey keyId already used.");
+        if ((r.rowCount ?? 0) !== otks.length) throw new ApiError(409, "prekey_id_conflict", "One-time prekey keyId already in the unused pool.");
       }
       const left = await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM one_time_prekeys WHERE user_id = $1 AND consumed_at IS NULL`, [uid]);
       return { oneTimePrekeyCount: left.rows[0]?.n ?? 0 };
@@ -167,6 +167,23 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
         oneTimePrekey: o ? { keyId: o.key_id, publicKey: enc(o.public_key), version: o.version } : null,
       });
     });
+  });
+
+  // Read-only lookup: identity + signed prekey only. Consumes NOTHING, so clients may call it
+  // on every receive; per-caller limit only (no per-target drain limit — there is nothing to drain).
+  app.get<{ Params: { username: string } }>("/keys/identity/:username", {
+    schema: { params: { type: "object", required: ["username"], properties: { username: { type: "string", pattern: USERNAME_RE } } } },
+    config: { rateLimit: { hook: "preHandler", max: 60, timeWindow: "1 minute", keyGenerator: (r) => `identity:${r.user?.id ?? r.ip}` } },
+  }, async (req, reply) => {
+    const r = await q().query<{ user_id: string; username: string; identity_key: Buffer; identity_key_version: number; signed_prekey_id: number; signed_prekey: Buffer; signed_prekey_signature: Buffer; signed_prekey_version: number }>(
+      `SELECT k.*, u.username FROM identity_keys k JOIN users u ON u.id = k.user_id WHERE u.username = $1`, [normalizeUsername(req.params.username)]);
+    const k = r.rows[0];
+    if (!k) return err(reply, 404, "not_found", "No keys published for that user.");
+    return {
+      userId: k.user_id, username: k.username,
+      identityKey: { publicKey: enc(k.identity_key), version: k.identity_key_version },
+      signedPrekey: { keyId: k.signed_prekey_id, publicKey: enc(k.signed_prekey), signature: enc(k.signed_prekey_signature), version: k.signed_prekey_version },
+    };
   });
 
   // ---------- conversations ----------

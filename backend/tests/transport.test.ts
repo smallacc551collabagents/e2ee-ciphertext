@@ -12,11 +12,17 @@ const pg = new PGlite();
 // Race simulation: when set, the next idempotency pre-check "misses" (as if a concurrent
 // request inserted the same clientMsgId between our SELECT and INSERT).
 let hideNextDupCheck = false;
+// Fault injection: fail the next one-time-prekey INSERT (after identity upsert + prekey delete ran).
+let failNextOtkInsert = false;
 const wrap = (c: PGlite | Transaction): Queryable => ({
   async query(text: string, values?: unknown[]) {
     if (hideNextDupCheck && text.startsWith("SELECT * FROM messages WHERE conversation_id = $1 AND sender_id")) {
       hideNextDupCheck = false;
       return { rows: [], rowCount: 0 };
+    }
+    if (failNextOtkInsert && text.trimStart().startsWith("INSERT INTO one_time_prekeys")) {
+      failNextOtkInsert = false;
+      throw new Error("injected failure");
     }
     const r = await c.query(text, values as never[]);
     return { rows: r.rows as never[], rowCount: Math.max(r.affectedRows ?? 0, r.rows.length) };
@@ -53,7 +59,7 @@ let alice = "", bob = "", eve = "";
 test("setup users", async () => { alice = await signup("alice"); bob = await signup("bob"); eve = await signup("eve"); });
 
 test("all transport routes require auth", async () => {
-  for (const [m, u] of [["GET", "/keys/count"], ["GET", "/conversations"], ["GET", "/keys/bundle/alice"], ["POST", "/messages/ack"]] as const) {
+  for (const [m, u] of [["GET", "/keys/count"], ["GET", "/conversations"], ["GET", "/keys/bundle/alice"], ["GET", "/keys/identity/alice"], ["POST", "/messages/ack"]] as const) {
     const r = await call(null, m, u, m === "POST" ? { messageIds: [] } : undefined);
     assert.equal(r.statusCode, 401, u);
   }
@@ -138,14 +144,15 @@ test("keys: failed publish rolls back fully (no partial identity replacement)", 
   assert.equal((await publish(carol, [1, 2, 3])).statusCode, 200);
   const before = (await call(alice, "GET", "/keys/bundle/carol")).json(); // consumes keyId 1
   assert.equal(before.oneTimePrekey.keyId, 1);
-  // New identity + reuse of consumed keyId 1 => 409 AFTER the upsert + prekey delete ran in the tx.
+  // New identity + a failure AFTER the upsert + prekey delete ran in the tx.
+  failNextOtkInsert = true;
   const bad = await call(carol, "POST", "/keys/publish", {
     identityKey: { publicKey: b64(33, 9), version: 2 },
     signedPrekey: { keyId: 2, publicKey: b64(33, 9), signature: b64(64, 9), version: 2 },
-    oneTimePrekeys: [{ keyId: 1, publicKey: b64(33, 9), version: 2 }],
+    oneTimePrekeys: [{ keyId: 5, publicKey: b64(33, 9), version: 2 }],
   });
-  assert.equal(bad.statusCode, 409);
-  assert.equal(bad.json().error, "prekey_id_conflict");
+  assert.equal(failNextOtkInsert, false, "failure path exercised");
+  assert.equal(bad.statusCode, 500);
   assert.equal((await call(carol, "GET", "/keys/count")).json().oneTimePrekeyCount, 2, "existing one-time prekeys intact");
   const after = (await call(alice, "GET", "/keys/bundle/carol")).json();
   assert.equal(after.identityKey.publicKey, b64(33), "prior identity key intact");
@@ -178,4 +185,42 @@ test("keys: per-target bundle limit applies across callers", async () => {
   assert.equal(codes.filter((c) => c === 200).length, 30);
   assert.equal(codes[30], 429, "31st request for the same target is limited regardless of caller");
   assert.equal((await call(frank, "GET", "/keys/bundle/carol")).statusCode, 200, "other targets unaffected");
+});
+
+test("keys: GET /keys/identity returns identity + signed prekey and consumes nothing", async () => {
+  const gina = await signup("gina");
+  assert.equal((await call(alice, "GET", "/keys/identity/gina")).statusCode, 404, "no keys yet");
+  assert.equal((await call(alice, "GET", "/keys/identity/nobody")).statusCode, 404);
+  assert.equal((await call(null, "GET", "/keys/identity/gina")).statusCode, 401);
+  assert.equal((await publish(gina, [1, 2])).statusCode, 200);
+  for (let i = 0; i < 5; i++) {
+    const r = await call(alice, "GET", "/keys/identity/GINA");
+    assert.equal(r.statusCode, 200);
+    const body = r.json();
+    assert.deepEqual(Object.keys(body).sort(), ["identityKey", "signedPrekey", "userId", "username"]);
+    assert.equal(body.username, "gina");
+    assert.deepEqual(body.identityKey, { publicKey: b64(33), version: 1 });
+    assert.deepEqual(body.signedPrekey, { keyId: 1, publicKey: b64(33), signature: b64(64), version: 1 });
+    assert.equal("oneTimePrekey" in body, false);
+  }
+  assert.equal((await call(gina, "GET", "/keys/count")).json().oneTimePrekeyCount, 2, "nothing consumed");
+  const bundle = (await call(alice, "GET", "/keys/bundle/gina")).json();
+  const ident = (await call(alice, "GET", "/keys/identity/gina")).json();
+  assert.deepEqual({ ...ident }, { userId: bundle.userId, username: bundle.username, identityKey: bundle.identityKey, signedPrekey: bundle.signedPrekey }, "same shape as bundle minus oneTimePrekey");
+});
+
+test("keys: consumed keyId can be re-uploaded after identity rotation; unused keyIds stay unique", async () => {
+  const hank = await signup("hank");
+  assert.equal((await publish(hank, [1, 2])).statusCode, 200);
+  assert.equal((await call(alice, "GET", "/keys/bundle/hank")).json().oneTimePrekey.keyId, 1); // consume 1
+  const rot = await call(hank, "POST", "/keys/publish", {
+    identityKey: { publicKey: b64(33, 9), version: 2 },
+    signedPrekey: { keyId: 2, publicKey: b64(33, 9), signature: b64(64, 9), version: 2 },
+    oneTimePrekeys: [{ keyId: 1, publicKey: b64(33, 9), version: 2 }, { keyId: 2, publicKey: b64(33, 9), version: 2 }],
+  });
+  assert.equal(rot.statusCode, 200, "re-uploading previously consumed keyId 1 succeeds");
+  assert.equal(rot.json().oneTimePrekeyCount, 2);
+  assert.equal((await call(hank, "POST", "/keys/publish", { oneTimePrekeys: [{ keyId: 2, publicKey: b64(33), version: 2 }] })).statusCode, 409, "unused keyId still unique");
+  const b = (await call(alice, "GET", "/keys/bundle/hank")).json();
+  assert.equal(b.oneTimePrekey.version, 2, "hands out the new key, not the consumed one");
 });
