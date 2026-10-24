@@ -43,7 +43,7 @@ Set these in the hosting providers, **never commit them**:
 - Vercel (frontend): `NEXT_PUBLIC_*` values (e.g. API / WebSocket base URL).
 - Render (backend): `DATABASE_URL`, `SESSION_SECRET`, plus anything else in `.env.example`.
 
-## Auth API (backend, live at https://e2ee-backend.vercel.app)
+## Auth API (backend, live at https://e2ee-ciphertext-backend.vercel.app)
 
 Username-only accounts; passwords hashed with argon2id (`@node-rs/argon2`, m=19MiB t=2 p=1).
 Sessions are opaque 256-bit tokens; only SHA-256 digests are stored (`sessions.token_hash`).
