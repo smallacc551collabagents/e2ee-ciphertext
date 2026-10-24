@@ -6,3 +6,4 @@ export * from './backend-bridge.js';
 export { safetyNumber, formatSafetyNumber, checkPeerIdentity } from './safety-number.js';
 export * from './peer-trust.js';
 export { toDisplayText, DISPLAY_MAX_CHARS } from './display.js';
+export * from './history-store.js';
