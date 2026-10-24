@@ -5,7 +5,7 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "pnpm -r --if-present build",
-    "lint": "pnpm -r --if-present lint",
+    "lint": "eslint .",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "format": "prettier --write ."
