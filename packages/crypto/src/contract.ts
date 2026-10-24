@@ -100,6 +100,11 @@ export interface CryptoAdapter {
   receive(envelopes: readonly CiphertextEnvelope[]): Promise<ReceiveResult[]>;
   /** Peer devices' Ed25519 fingerprints, for safety-number display. */
   peerIdentities(userId: string): Promise<DeviceIdentity[]>;
+  /**
+   * Tell the library how many unused one-time prekeys the server holds
+   * (GET /keys/count). When low, the library generates and uploads more.
+   */
+  replenishPrekeys(serverCount: number): Promise<void>;
   /** Release in-memory state. Persistent state stays encrypted at rest. */
   close(): void;
 }

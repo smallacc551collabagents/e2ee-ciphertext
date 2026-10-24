@@ -68,6 +68,9 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     return M.OlmMachine.initFromStore(new M.UserId(opts.userId), new M.DeviceId(opts.deviceId), handle);
   });
   let closed = false;
+  // Signal an empty fallback-key set once so the library creates a signed
+  // fallback key: the backend requires it as the signed prekey on first publish.
+  await withLock(lockName, () => machine.receiveSyncChanges('[]', new M.DeviceLists(), new Map(), new Set()));
 
   const keys = machine.identityKeys;
   const ident: DeviceIdentity = {
@@ -154,7 +157,7 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
           await machine.updateTrackedUsers([new M.UserId(env.sender.userId)]);
           await flush();
           const event = { type: 'm.room.encrypted', sender: env.sender.userId, content: env.content };
-          const out = await machine.receiveSyncChanges(JSON.stringify([event]), new M.DeviceLists(), new Map(), new Set());
+          const out = await machine.receiveSyncChanges(JSON.stringify([event]), new M.DeviceLists(), new Map());
           const r = out[0];
           if (r && r.type === M.ProcessedToDeviceEventType.Decrypted) {
             const d = r as M.DecryptedToDeviceEvent;
@@ -185,6 +188,13 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
           });
         }
         return results;
+      }),
+
+    replenishPrekeys: (serverCount) =>
+      withLock(lockName, async () => {
+        guard();
+        await machine.receiveSyncChanges('[]', new M.DeviceLists(), new Map([['signed_curve25519', serverCount]]), new Set(['signed_curve25519']));
+        await flush();
       }),
 
     peerIdentities: async (userId) => {
