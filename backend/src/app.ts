@@ -4,20 +4,22 @@ import cookie from "@fastify/cookie";
 import { db } from "./database/db.js";
 import { authRoutes } from "./routes/auth.js";
 
-// CORS allowlist: localhost dev + Vercel deployments. Tighten to the exact
-// frontend domain once it is fixed (set CORS_ORIGINS=comma,separated,list).
-const extra = (process.env.CORS_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-const allowed = (origin: string): boolean =>
-  extra.includes(origin) ||
-  /^http:\/\/localhost:3000$/.test(origin) ||
-  /^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(origin);
+import rateLimit from "@fastify/rate-limit";
+
+// CORS allowlist: ONLY http://localhost:3000 plus exact origins in CORS_ORIGINS
+// (comma-separated). No wildcard *.vercel.app matching.
+const allowedOrigins = new Set([
+  "http://localhost:3000",
+  ...(process.env.CORS_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+]);
+const allowed = (origin: string): boolean => allowedOrigins.has(origin);
 
 export function buildApp(): FastifyInstance {
   // Logger: never log request bodies (credentials, ciphertext envelopes) or auth headers.
   const app = Fastify({
     logger: {
       level: process.env.LOG_LEVEL ?? "info",
-      redact: ["req.headers.authorization", "req.headers.cookie", 'res.headers["set-cookie"]'],
+      redact: ["req.headers.authorization", "req.headers.cookie", 'req.headers["x-proxy-secret"]', 'res.headers["set-cookie"]'],
     },
     bodyLimit: 64 * 1024,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
@@ -27,10 +29,13 @@ export function buildApp(): FastifyInstance {
     origin: (origin, cb) => cb(null, !origin || allowed(origin)),
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type"],
     maxAge: 600,
   });
   void app.register(cookie);
+  // Rate limiting is opt-in per route (global: false); see routes/auth.ts.
+  // In-memory store: resets per serverless cold start — acceptable interim, Redis later.
+  void app.register(rateLimit, { global: false });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err.validation) {
