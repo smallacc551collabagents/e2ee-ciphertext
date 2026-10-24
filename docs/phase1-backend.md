@@ -44,3 +44,7 @@ Non-members get 404 rather than 403, so the API doesn't reveal which conversatio
 `(user_id, key_id)` is unique only among **unused** one-time prekeys (partial unique index `one_time_prekeys_user_id_key_id_unused_key ... WHERE consumed_at IS NULL`, migration `20261024150000_otk_partial_unique`). Re-uploading a keyId that was already consumed (e.g. after an identity rotation) succeeds; re-uploading a keyId that is still unused returns 409 `prekey_id_conflict`. Replacing the identity key still deletes all unused one-time prekeys.
 
 Rate limits are held in the shared Postgres store, so they survive cold starts (E2EE-75). See `security.md#rate-limiting-e2ee-75--resolved`.
+
+## Encrypted attachments (E2EE-47)
+Blob upload/download endpoints, size cap, storage choice and presigned flow: see
+[attachments-backend.md](attachments-backend.md).

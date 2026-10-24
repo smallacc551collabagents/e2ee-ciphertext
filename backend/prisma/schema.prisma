@@ -29,6 +29,8 @@ model User {
   sentMessages Message[]
   deliveries   MessageDelivery[]
 
+  attachments Attachment[]
+
   @@map("users")
 }
 
@@ -103,6 +105,8 @@ model Conversation {
   members   ConversationMember[]
   messages  Message[]
 
+  attachments Attachment[]
+
   @@map("conversations")
 }
 
@@ -160,4 +164,23 @@ model RateLimit {
 
   @@index([expiresAt])
   @@map("rate_limits")
+}
+
+/// E2EE-47: opaque encrypted attachment blobs (bytes live in Neon Object Storage under key "a/<ref>").
+/// Never holds names, MIME types, keys or plaintext. CHECK status IN ('pending','stored') is in SQL.
+model Attachment {
+  ref            String       @id
+  ownerUserId    String       @map("owner_user_id") @db.Uuid
+  conversationId String       @map("conversation_id") @db.Uuid
+  sizeBytes      Int          @map("size_bytes")
+  sha256         String
+  status         String       @default("pending")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt      DateTime     @map("expires_at") @db.Timestamptz(3)
+  owner          User         @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([ownerUserId, createdAt])
+  @@map("attachments")
 }
