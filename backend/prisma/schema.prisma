@@ -1,12 +1,53 @@
-// Minimal skeleton. Real E2EE schema (users, devices, prekeys, per-device
-// envelope queue) lands in Phase 1 after the crypto contract freeze.
-// Never add plaintext message bodies or private/session/file keys here.
+// Identity layer only (users, sessions, password reset tokens).
+// The E2EE crypto-dependent schema (devices, prekeys, envelopes) stays frozen
+// until the Phase 1 contract freeze. Never add plaintext message bodies or
+// private/session/file keys here. Only hashes of secrets are stored.
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String               @id @default(uuid()) @db.Uuid
+  /// Stored normalized (lowercase); unique => case-insensitive uniqueness.
+  username     String               @unique
+  passwordHash String               @map("password_hash")
+  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sessions     Session[]
+  resetTokens  PasswordResetToken[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  /// SHA-256 of the opaque bearer token; raw token never stored.
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
 }
