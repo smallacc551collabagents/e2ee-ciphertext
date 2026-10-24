@@ -38,12 +38,12 @@ function deviceIdFor(userId: string): string {
   return id;
 }
 
-/** Adapter options. identityGate is REQUIRED here (optional in the library): encrypt must refuse unverified identity changes. */
-export function olmOptions(c: Pick<Crypto, "userIdFor" | "createBackendTransport" | "createIdentityGate">, me: Me, deviceId: string, peers: PeerIdentityStore, transportHttp: BackendHttp = http): OlmAdapterOptions & { identityGate: NonNullable<OlmAdapterOptions["identityGate"]> } {
+/** Adapter options. identityGate (wrapped with withRevocationCheck, fail-closed) is REQUIRED here (optional in the library): encrypt must refuse unverified identity changes. */
+export function olmOptions(c: Pick<Crypto, "userIdFor" | "createBackendTransport" | "createIdentityGate" | "withRevocationCheck">, me: Me, deviceId: string, peers: PeerIdentityStore, transportHttp: BackendHttp = http): OlmAdapterOptions & { identityGate: NonNullable<OlmAdapterOptions["identityGate"]> } {
   return {
     userId: c.userIdFor(me.username), deviceId,
     transport: c.createBackendTransport(transportHttp), storeName: storeNameFor(me.id),
-    identityGate: c.createIdentityGate(peers),
+    identityGate: c.withRevocationCheck(c.createIdentityGate(peers), { http: transportHttp, store: peers }),
   };
 }
 

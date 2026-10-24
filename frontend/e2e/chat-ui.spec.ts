@@ -35,9 +35,10 @@ test.describe("chat UI", () => {
     await expect(page).toHaveURL(/\/chat$/);
   });
 
-  test("production adapter shows coming-soon, no fake data", async ({ page }) => {
+  test("production path uses the real adapter: no coming-soon placeholder, no fake data", async ({ page }) => {
     test.skip(fixtures, "fixtures server");
-    await expect(page.getByTestId("chat-coming-soon")).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByTestId("chat-coming-soon")).toHaveCount(0);
     await expect(page.getByText("Ava Testwell")).toHaveCount(0);
   });
 

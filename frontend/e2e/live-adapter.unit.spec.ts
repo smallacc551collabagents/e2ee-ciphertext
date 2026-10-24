@@ -4,9 +4,11 @@ import { olmOptions } from "../src/features/chat/data/live";
 test("live adapter always passes identityGate to createOlmAdapter", () => {
   const gate = { assertUserNotPending: async () => {}, assertTrusted: async () => {} };
   const store = { get: async () => undefined, set: async () => {} };
-  const c = { userIdFor: (u: string) => `@${u}:e2ee.local`, createBackendTransport: () => ({ send: async () => ({}) }) as never, createIdentityGate: () => gate };
+  const wrapped = { ...gate };
+  const c = { userIdFor: (u: string) => `@${u}:e2ee.local`, createBackendTransport: () => ({ send: async () => ({}) }) as never, createIdentityGate: () => gate, withRevocationCheck: () => wrapped };
   const opts = olmOptions(c, { id: "1", username: "alice" }, "DEV1", store);
-  expect(opts.identityGate).toBe(gate);
+  expect(opts.identityGate).toBeTruthy();
+  expect(opts.identityGate).toBe(wrapped);
   expect(opts.userId).toBe("@alice:e2ee.local");
   expect(opts.storeName).toBe("e2ee-1");
   // Per-user store: a second account in the same browser never opens another user's store.
@@ -41,4 +43,35 @@ test("wipe calls crypto deleteLocalCryptoState(storeName) per user", async () =>
   expect(called.sort()).toEqual(["e2ee-u1", "e2ee-u2"]);
   expect([...ls.keys()]).toEqual(["other"]);
   delete g.localStorage; delete g.indexedDB;
+});
+
+import { createIdentityGate, withRevocationCheck } from "@e2ee/crypto";
+test("identityGate is wrapped with withRevocationCheck (same store + http)", () => {
+  const store = { get: async () => undefined, set: async () => {} };
+  const http = { request: async () => ({}) };
+  const calls: { inner: unknown; o: { http: unknown; store: unknown } }[] = [];
+  const inner = { assertUserNotPending: async () => {}, assertTrusted: async () => {} };
+  const c = {
+    userIdFor: (u: string) => `@${u}:e2ee.local`, createBackendTransport: () => ({}) as never,
+    createIdentityGate: () => inner,
+    withRevocationCheck: ((g: unknown, o: { http: unknown; store: unknown }) => { calls.push({ inner: g, o }); return { ...inner, wrapped: true }; }) as never,
+  };
+  const opts = olmOptions(c, { id: "1", username: "alice" }, "DEV1", store, http);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.inner).toBe(inner);
+  expect(calls[0]!.o.store).toBe(store);
+  expect(calls[0]!.o.http).toBe(http);
+  expect((opts.identityGate as { wrapped?: boolean }).wrapped).toBe(true);
+});
+
+test("real crypto: wrapped gate fails closed when /keys/identity is unreachable", async () => {
+  const store = { get: async () => undefined, set: async () => {} };
+  const http = { request: async () => { throw Object.assign(new Error("down"), { status: 503 }); } };
+  const opts = olmOptions({ userIdFor: (u: string) => `@${u}:e2ee.local`, createBackendTransport: () => ({}) as never, createIdentityGate, withRevocationCheck }, { id: "1", username: "alice" }, "DEV1", store, http);
+  await expect(opts.identityGate.assertTrusted({ userId: "@bob:e2ee.local", deviceId: "B", ed25519: "x", curve25519: "y" })).rejects.toMatchObject({ code: "TRANSPORT_FAILED" });
+});
+
+import { chatAdapter } from "../src/features/chat/data";
+test("production path returns the real Olm-backed live adapter, never unavailableAdapter", () => {
+  expect(chatAdapter({ id: "1", username: "alice" }).id).toBe("live");
 });

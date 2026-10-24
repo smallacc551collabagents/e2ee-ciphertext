@@ -3,14 +3,15 @@
 export interface Kv<T> { get(k: string): Promise<T | undefined>; set(k: string, v: T): Promise<void> }
 
 export function idbKv<T>(dbName: string, store = "kv"): Kv<T> {
-  const db = new Promise<IDBDatabase>((resolve, reject) => {
+  let opened: Promise<IDBDatabase> | null = null; // lazy: safe to construct during SSR
+  const open = () => (opened ??= new Promise<IDBDatabase>((resolve, reject) => {
     const r = indexedDB.open(dbName, 1);
     r.onupgradeneeded = () => r.result.createObjectStore(store);
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
-  });
+  }));
   const tx = async <R>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<R>) => {
-    const s = (await db).transaction(store, mode).objectStore(store);
+    const s = (await open()).transaction(store, mode).objectStore(store);
     return new Promise<R>((res, rej) => { const q = fn(s); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
   };
   return {
