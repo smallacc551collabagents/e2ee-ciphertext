@@ -136,7 +136,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
       <aside aria-label="Conversations" className={`${active ? "hidden md:flex" : "flex"} w-full shrink-0 flex-col border-r border-slate-200 bg-white md:w-[360px]`}>
         <div className="flex items-center justify-between px-4 pb-3 pt-5">
           <h2 className="text-2xl font-bold">Chats</h2>
-          <button type="button" disabled title="New chat — coming soon" aria-label="New chat"
+          <button type="button" title="New chat — coming soon" aria-label="New chat"
             className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-lg text-blue-700 disabled:opacity-50">+</button>
         </div>
         <div className="px-2 pb-3">
