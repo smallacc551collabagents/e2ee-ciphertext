@@ -105,6 +105,12 @@ export interface CryptoAdapter {
    * (GET /keys/count). When low, the library generates and uploads more.
    */
   replenishPrekeys(serverCount: number): Promise<void>;
+  /**
+   * Force a fresh key query for a peer (GET /keys/identity) and return the
+   * devices the library has VERIFIED. A changed key for a known device id is
+   * not accepted by the library; compare against published keys separately.
+   */
+  refreshPeer(userId: string): Promise<DeviceIdentity[]>;
   /** Release in-memory state. Persistent state stays encrypted at rest. */
   close(): void;
 }
