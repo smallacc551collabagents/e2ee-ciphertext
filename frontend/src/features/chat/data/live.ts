@@ -6,6 +6,7 @@ type Crypto = typeof import("@e2ee/crypto");
 import { chatApi } from "./http";
 import { idbKv } from "./idb";
 import type { HistoryStore } from "./history";
+import { browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
 import { onWipe, storeNameFor, wipeLocalE2EE } from "./wipe";
 import { IdentityChangedError, type ChatAdapter, type ConversationView, type MessageView, type SafetyInfo } from "./types";
 import type { ConversationWire, MessageWire } from "./wire";
@@ -47,6 +48,18 @@ export function olmOptions(c: Pick<Crypto, "userIdFor" | "createBackendTransport
   };
 }
 
+/** Plaintext -> view fields. Attachment messages carry an (untrusted, re-validated on open) descriptor. */
+export function plaintextView(pt: string, display: (t: string) => string): { text: string; attachment?: unknown } {
+  const a = decodeAttachmentMessage(pt);
+  return a !== null ? { text: "Attachment", attachment: a } : { text: display(pt) };
+}
+
+/** File names must satisfy the descriptor rules (1–255 chars, no control chars / path separators). */
+export function safeFileName(n: string): string {
+  const s = n.replace(/[\u0000-\u001f\u007f/\\]/g, "_").slice(0, 255);
+  return s || "file";
+}
+
 /** decrypt -> persist (awaited) -> ack. A message is acked only after its plaintext is stored. */
 export async function processIncoming(
   pending: readonly MessageWire[],
@@ -64,7 +77,7 @@ export async function processIncoming(
         persisted.push(m.id);
       } catch { /* not persisted -> not acked; redelivered later */ }
     }
-    d.onView({ id: m.id, fromMe: false, text: r?.ok ? d.display(r.plaintext) : "Unable to decrypt this message", sentAt: m.createdAt, status: "delivered" });
+    d.onView({ id: m.id, fromMe: false, ...(r?.ok ? plaintextView(r.plaintext, d.display) : { text: "Unable to decrypt this message" }), sentAt: m.createdAt, status: "delivered" });
   }
   if (persisted.length) await d.ack(persisted).catch(() => undefined);
   return results;
@@ -88,6 +101,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       await adapter.sync();
       await adapter.replenishPrekeys((await chatApi.prekeyCount()).oneTimePrekeyCount);
       const verifier = c.createPeerVerifier({ adapter, http, store: peers });
+      display = c.toDisplayText;
       const texts = injected ?? (await c.openHistoryStore(storeNameFor(me.id)));
       onWipe(() => texts.close());
       return { c, adapter, verifier, texts };
@@ -102,6 +116,34 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const { c, verifier } = await init();
     note(await verifier.refreshStale([...convos.values()].map((v) => c.userIdFor(peerOf(v).username))));
   }
+
+  async function sendPlain(conversationId: string, text: string, clientId: string): Promise<MessageView> {
+      const { c, adapter, texts } = await init();
+      const conv = convos.get(conversationId);
+      if (!conv) throw new Error("unknown conversation");
+      const peerId = c.userIdFor(peerOf(conv).username);
+      if (changed.has(peerId) || (await peers.get(peerId))?.pendingChange) throw new IdentityChangedError(peerId);
+      let devs = await adapter.peerIdentities(peerId);
+      if (!devs.length) devs = await adapter.refreshPeer(peerId);
+      if (!devs.length) throw new Error("peer has no keys");
+      let env;
+      try {
+        env = await adapter.encrypt({ userId: peerId, deviceId: devs[0]!.deviceId }, text);
+      } catch (e) {
+        if ((e as { code?: string }).code === "IDENTITY_CHANGED") {
+          const cur = (await adapter.refreshPeer(peerId))[0] ?? devs[0]!;
+          changed.set(peerId, cur);
+          throw new IdentityChangedError(peerId);
+        }
+        throw e;
+      }
+      const { message } = await chatApi.sendMessage(conversationId, c.encodeMessage(env, clientId));
+      await texts.put(conversationId, message.seq, { id: message.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text, sentAt: message.createdAt, clientMsgId: clientId }).catch(() => undefined);
+      threads.get(conversationId)?.cache?.set(message.id, text);
+      return { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent" };
+    }
+
+  let display: (t: string) => string = (t) => t;
 
   return {
     id: "live",
@@ -133,7 +175,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       for (const m of wire) {
         const cached = cache.get(m.id);
         if (cached !== undefined || m.senderId === me.id) {
-          out.push({ id: m.id, clientId: m.clientMsgId, fromMe: m.senderId === me.id, text: cached !== undefined ? c.toDisplayText(cached) : "Sent from another session", sentAt: m.createdAt, status: "sent" });
+          out.push({ id: m.id, clientId: m.clientMsgId, fromMe: m.senderId === me.id, ...(cached !== undefined ? plaintextView(cached, c.toDisplayText) : { text: "Sent from another session" }), sentAt: m.createdAt, status: "sent" });
         } else pending.push(m);
       }
       if (pending.length) {
@@ -149,31 +191,21 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       return thread.views;
     },
     async sendMessage(conversationId, text, clientId) {
-      const { c, adapter, texts } = await init();
-      const conv = convos.get(conversationId);
-      if (!conv) throw new Error("unknown conversation");
-      const peerId = c.userIdFor(peerOf(conv).username);
-      if (changed.has(peerId) || (await peers.get(peerId))?.pendingChange) throw new IdentityChangedError(peerId);
-      let devs = await adapter.peerIdentities(peerId);
-      if (!devs.length) devs = await adapter.refreshPeer(peerId);
-      if (!devs.length) throw new Error("peer has no keys");
-      let env;
-      try {
-        env = await adapter.encrypt({ userId: peerId, deviceId: devs[0]!.deviceId }, text);
-      } catch (e) {
-        if ((e as { code?: string }).code === "IDENTITY_CHANGED") {
-          const cur = (await adapter.refreshPeer(peerId))[0] ?? devs[0]!;
-          changed.set(peerId, cur);
-          throw new IdentityChangedError(peerId);
-        }
-        throw e;
-      }
-      const { message } = await chatApi.sendMessage(conversationId, c.encodeMessage(env, clientId));
-      await texts.put(conversationId, message.seq, { id: message.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text, sentAt: message.createdAt, clientMsgId: clientId }).catch(() => undefined);
-      threads.get(conversationId)?.cache?.set(message.id, text);
-      return { id: message.id, clientId, fromMe: true, text: c.toDisplayText(text), sentAt: message.createdAt, status: "sent" };
+      return sendPlain(conversationId, text, clientId);
     },
-    async safety(conversationId): Promise<SafetyInfo> {
+    async sendAttachment(conversationId, file, clientId, onPhase) {
+      const { c } = await init();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const desc = await sendAtt(conversationId, bytes, { name: safeFileName(file.name), mime: /^[\w.+-]+\/[\w.+-]+$/.test(file.type) ? file.type : "application/octet-stream" }, browserDeps(c), onPhase);
+      return sendPlain(conversationId, encodeAttachmentMessage(desc), clientId);
+    },
+    async openAttachment(descriptor, onPhase) {
+      const { c } = await init();
+      const r = await openAtt(descriptor, browserDeps(c), onPhase);
+      return { bytes: r.bytes, name: r.descriptor.name, mime: r.descriptor.mime };
+    },
+    displayText: (t) => display(t),
+        async safety(conversationId): Promise<SafetyInfo> {
       const { c, adapter } = await init();
       const conv = convos.get(conversationId);
       if (!conv) return { digits: null, changed: false };

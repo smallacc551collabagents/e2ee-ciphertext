@@ -75,3 +75,25 @@ import { chatAdapter } from "../src/features/chat/data";
 test("production path returns the real Olm-backed live adapter, never unavailableAdapter", () => {
   expect(chatAdapter({ id: "1", username: "alice" }).id).toBe("live");
 });
+
+import { plaintextView, safeFileName } from "../src/features/chat/data/live";
+import { encodeAttachmentMessage } from "../src/features/chat/attachments/flow";
+
+test("attachment messages decode on receive into an attachment view; plain text goes through display", async () => {
+  const desc = { ref: "r1", name: "a.png", mime: "image/png", size: 3 };
+  const pt = encodeAttachmentMessage(desc as never);
+  expect(plaintextView(pt, () => "X")).toEqual({ text: "Attachment", attachment: desc });
+  expect(plaintextView("hi", (t) => `[${t}]`)).toEqual({ text: "[hi]" });
+  const views: unknown[] = [];
+  await processIncoming([{ id: "1", conversationId: "c", senderId: "p", seq: "1", clientMsgId: "cid_1xxxx", ciphertext: "AA==", version: 1, createdAt: "2026-10-24T00:00:00Z" }], {
+    receive: async () => ({ ok: true, plaintext: pt, sender: { userId: "@p:e2ee.local", deviceId: "D" } }) as never,
+    display: (t) => t, history: { put: async () => {} }, ack: async () => {}, onView: (v) => views.push(v),
+  });
+  expect(views[0]).toMatchObject({ text: "Attachment", attachment: desc });
+});
+
+test("safeFileName strips path separators/control chars and bounds length", () => {
+  expect(safeFileName("../x\\y\u0001.txt")).toBe(".._x_y_.txt");
+  expect(safeFileName("")).toBe("file");
+  expect(safeFileName("a".repeat(300))).toHaveLength(255);
+});
