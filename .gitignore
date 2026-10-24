@@ -14,3 +14,5 @@ coverage/
 frontend/test-results/
 frontend/playwright-report/
 frontend/next-env.d.ts
+.vercel
+.env*
