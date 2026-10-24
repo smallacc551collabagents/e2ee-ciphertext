@@ -71,3 +71,7 @@ and is exported for a future cron. Expired rows are never served even before the
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | A Neon storage credential (`storage:read` + `storage:write`) on branch `main`: Neon Console → project → Settings → Credentials → Create credential (or Connect → Storage → Reveal), or `neon credentials create --scope storage:read --scope storage:write --name e2ee-backend-attachments`. Access key id = `nak_live_…` token id, secret = `nsk_live_…`. |
 | `ATTACHMENTS_BUCKET` | optional, default `e2ee-attachments` |
 No new GitHub Actions secrets are needed (migrations use the existing `DATABASE_URL_DIRECT`).
+
+## Known limits
+
+- **30-day blob retention.** A stored blob is deleted 30 days after upload **even if a message still references it**. After that, opening the chat shows a broken attachment — the ciphertext is gone from object storage (the Olm message and its descriptor remain, but the referenced blob no longer resolves). This is acceptable for launch; revisit with reference-aware retention (keep a blob while any undeleted message points to it) or longer/configurable TTL in a later phase.
