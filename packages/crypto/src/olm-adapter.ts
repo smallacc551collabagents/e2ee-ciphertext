@@ -68,6 +68,9 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     return M.OlmMachine.initFromStore(new M.UserId(opts.userId), new M.DeviceId(opts.deviceId), handle);
   });
   let closed = false;
+  // Signal an empty fallback-key set once so the library creates a signed
+  // fallback key: the backend requires it as the signed prekey on first publish.
+  await withLock(lockName, () => machine.receiveSyncChanges('[]', new M.DeviceLists(), new Map(), new Set()));
 
   const keys = machine.identityKeys;
   const ident: DeviceIdentity = {
@@ -112,8 +115,11 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     encrypt: (peer, plaintext) =>
       withLock(lockName, async () => {
         guard();
-        await machine.updateTrackedUsers([new M.UserId(peer.userId)]);
-        await flush();
+        const cached = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
+        if (!cached) {
+          await machine.updateTrackedUsers([new M.UserId(peer.userId)]);
+          await flush();
+        }
         const claim = await machine.getMissingSessions([new M.UserId(peer.userId)]);
         if (claim) await send(claim.id, M.RequestType.KeysClaim, claim.body);
         const device = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
@@ -151,10 +157,15 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
           }
           // Know the sender's published devices first, so the library can bind
           // the authenticated Curve25519 key to a specific signed device.
-          await machine.updateTrackedUsers([new M.UserId(env.sender.userId)]);
-          await flush();
+          // Device keys are cached (verified) in the encrypted store; only query
+          // when the sender device is unknown. Never claims OTKs on receive.
+          const known = await machine.getDevice(new M.UserId(env.sender.userId), new M.DeviceId(env.sender.deviceId));
+          if (!known) {
+            await machine.updateTrackedUsers([new M.UserId(env.sender.userId)]);
+            await flush();
+          }
           const event = { type: 'm.room.encrypted', sender: env.sender.userId, content: env.content };
-          const out = await machine.receiveSyncChanges(JSON.stringify([event]), new M.DeviceLists(), new Map(), new Set());
+          const out = await machine.receiveSyncChanges(JSON.stringify([event]), new M.DeviceLists(), new Map());
           const r = out[0];
           if (r && r.type === M.ProcessedToDeviceEventType.Decrypted) {
             const d = r as M.DecryptedToDeviceEvent;
@@ -185,6 +196,13 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
           });
         }
         return results;
+      }),
+
+    replenishPrekeys: (serverCount) =>
+      withLock(lockName, async () => {
+        guard();
+        await machine.receiveSyncChanges('[]', new M.DeviceLists(), new Map([['signed_curve25519', serverCount]]), new Set(['signed_curve25519']));
+        await flush();
       }),
 
     peerIdentities: async (userId) => {
