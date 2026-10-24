@@ -1,14 +1,17 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
-import { getSession } from "@/lib/api/server";
+import { getSessionResult } from "@/lib/api/server";
+import { BackendUnavailable } from "@/components/BackendUnavailable";
 import { LogoutButton } from "@/components/LogoutButton";
 
 export const dynamic = "force-dynamic";
 
 export default async function PrivateLayout({ children }: { children: ReactNode }) {
-  const user = await getSession();
-  if (!user) redirect("/login") // middleware already cleared any stale cookie;
+  const session = await getSessionResult();
+  if (session.status === "unavailable") return <BackendUnavailable />;
+  if (session.status === "anonymous") redirect("/login"); // middleware already cleared any stale cookie
+  const { user } = session;
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b bg-white px-4 py-2">

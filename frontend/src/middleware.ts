@@ -6,7 +6,8 @@ const PRIVATE = ["/chat", "/settings"];
 const AUTH_PAGES = ["/login", "/signup"];
 const matches = (p: string, list: string[]) => list.some((r) => p === r || p.startsWith(`${r}/`));
 
-type SessionState = "none" | "valid" | "invalid";
+// "unknown" = backend 5xx / unreachable (E2EE-73): never redirect on it, let the page render an error state.
+type SessionState = "none" | "valid" | "invalid" | "unknown";
 
 async function sessionState(req: NextRequest): Promise<SessionState> {
   const token = req.cookies.get(SESSION_COOKIE)?.value;
@@ -14,9 +15,9 @@ async function sessionState(req: NextRequest): Promise<SessionState> {
   try {
     const res = await fetch(`${BACKEND_URL}/auth/me`, { headers: { ...backendAuthHeaders(req.headers, (req as unknown as { ip?: string }).ip ?? null), cookie: `${SESSION_COOKIE}=${token}` }, cache: "no-store" });
     if (res.ok) return "valid";
-    return res.status === 401 ? "invalid" : "valid"; // transient backend errors: let the layout decide
+    return res.status === 401 ? "invalid" : "unknown";
   } catch {
-    return "valid";
+    return "unknown";
   }
 }
 
@@ -34,8 +35,8 @@ export async function middleware(req: NextRequest) {
   const state = await sessionState(req);
   const clear = state === "invalid";
 
-  if (pathname === "/") return state === "valid" ? NextResponse.redirect(new URL("/chat", req.url)) : toLogin(req, undefined, clear);
-  if (matches(pathname, PRIVATE) && state !== "valid") return toLogin(req, pathname, clear);
+  if (pathname === "/") return state === "valid" || state === "unknown" ? NextResponse.redirect(new URL("/chat", req.url)) : toLogin(req, undefined, clear);
+  if (matches(pathname, PRIVATE) && (state === "none" || state === "invalid")) return toLogin(req, pathname, clear);
   if (matches(pathname, AUTH_PAGES)) {
     if (state === "valid") return NextResponse.redirect(new URL("/chat", req.url));
     if (clear) {
