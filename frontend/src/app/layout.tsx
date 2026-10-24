@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
 
+export const dynamic = "force-dynamic"; // E2EE-67: nonce CSP needs per-request rendering
 export const metadata: Metadata = { title: "Ciphertext", description: "End-to-end encrypted chat" };
 
 // System font stack only: no third-party font CDNs, no analytics.
