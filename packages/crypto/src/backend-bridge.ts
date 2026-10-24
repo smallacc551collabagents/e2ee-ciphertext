@@ -148,14 +148,12 @@ export function fromBundle(bundle: Bundle, expectedUserId: string) {
 
 /** A KeyServerTransport that speaks the Phase 1 backend API. */
 export function createBackendTransport(http: BackendHttp): KeyServerTransport {
-  // A bundle fetch atomically consumes one OTK; keep it for the following claim.
-  const cache = new Map<string, ReturnType<typeof fromBundle>>();
-  async function bundleFor(userId: string) {
+  // keys.query -> non-consuming GET /keys/identity; keys.claim -> GET /keys/bundle (consumes one OTK).
+  async function fetchKeys(userId: string, consume: boolean) {
+    const path = `/keys/${consume ? 'bundle' : 'identity'}/${encodeURIComponent(usernameOf(userId))}`;
     try {
-      const raw = (await http.request('GET', `/keys/bundle/${encodeURIComponent(usernameOf(userId))}`)) as Bundle;
-      const decoded = fromBundle(raw, userId);
-      cache.set(userId, decoded);
-      return decoded;
+      const raw = (await http.request('GET', path)) as Bundle;
+      return fromBundle({ ...raw, oneTimePrekey: consume ? raw.oneTimePrekey : null }, userId);
     } catch (e) {
       if ((e as { status?: number }).status === 404) return null;
       throw e;
@@ -178,7 +176,7 @@ export function createBackendTransport(http: BackendHttp): KeyServerTransport {
       case 'keys.query': {
         const out: Record<string, Json> = {};
         for (const u of Object.keys(b.device_keys as Json)) {
-          const d = await bundleFor(u);
+          const d = await fetchKeys(u, false);
           out[u] = d ? { [d.deviceId]: d.deviceKeys } : {};
         }
         return JSON.stringify({ device_keys: out, failures: {} });
@@ -186,8 +184,7 @@ export function createBackendTransport(http: BackendHttp): KeyServerTransport {
       case 'keys.claim': {
         const out: Record<string, Json> = {};
         for (const [u, ds] of Object.entries(b.one_time_keys as Record<string, Json>)) {
-          const d = cache.get(u) ?? (await bundleFor(u));
-          cache.delete(u); // a cached OTK is used at most once
+          const d = await fetchKeys(u, true);
           if (!d || !(d.deviceId in ds)) continue;
           const k = d.oneTime ?? d.signedPrekey; // fall back to signed prekey when pool is empty
           out[u] = { [d.deviceId]: { [k.id]: k.key } };

@@ -115,8 +115,11 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     encrypt: (peer, plaintext) =>
       withLock(lockName, async () => {
         guard();
-        await machine.updateTrackedUsers([new M.UserId(peer.userId)]);
-        await flush();
+        const cached = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
+        if (!cached) {
+          await machine.updateTrackedUsers([new M.UserId(peer.userId)]);
+          await flush();
+        }
         const claim = await machine.getMissingSessions([new M.UserId(peer.userId)]);
         if (claim) await send(claim.id, M.RequestType.KeysClaim, claim.body);
         const device = await machine.getDevice(new M.UserId(peer.userId), new M.DeviceId(peer.deviceId));
@@ -154,8 +157,13 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
           }
           // Know the sender's published devices first, so the library can bind
           // the authenticated Curve25519 key to a specific signed device.
-          await machine.updateTrackedUsers([new M.UserId(env.sender.userId)]);
-          await flush();
+          // Device keys are cached (verified) in the encrypted store; only query
+          // when the sender device is unknown. Never claims OTKs on receive.
+          const known = await machine.getDevice(new M.UserId(env.sender.userId), new M.DeviceId(env.sender.deviceId));
+          if (!known) {
+            await machine.updateTrackedUsers([new M.UserId(env.sender.userId)]);
+            await flush();
+          }
           const event = { type: 'm.room.encrypted', sender: env.sender.userId, content: env.content };
           const out = await machine.receiveSyncChanges(JSON.stringify([event]), new M.DeviceLists(), new Map());
           const r = out[0];

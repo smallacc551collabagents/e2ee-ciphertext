@@ -13,6 +13,7 @@ class FakeBackend {
   messages: any[] = [];
   bodies: string[] = [];
   bundleFetches = 0;
+  identityFetches = 0;
   private canon(s: string, max: number) {
     const ok = /^[A-Za-z0-9+/]+={0,2}$/.test(s) && Buffer.from(s, 'base64').toString('base64') === s && Buffer.from(s, 'base64').length <= max;
     if (!ok) throw Object.assign(new Error('invalid_key'), { status: 400 });
@@ -45,6 +46,14 @@ class FakeBackend {
       return { oneTimePrekeyCount: pool() };
     }
     if (method === 'GET' && path === '/keys/count') return { oneTimePrekeyCount: pool() };
+    const mi = /^\/keys\/identity\/(.+)$/.exec(path);
+    if (method === 'GET' && mi) {
+      this.identityFetches++;
+      const target = decodeURIComponent(mi[1]!);
+      const id = this.ids.get(target);
+      if (!id) throw Object.assign(new Error('not found'), { status: 404 });
+      return { userId: `uuid-${target}`, username: target, identityKey: id.identityKey, signedPrekey: id.signedPrekey };
+    }
     const m = /^\/keys\/bundle\/(.+)$/.exec(path);
     if (method === 'GET' && m) {
       this.bundleFetches++;
@@ -156,5 +165,33 @@ describe('backend bridge (PR #13 wire shapes)', () => {
     expect(checkPeerIdentity(stored, bob.identity())).toEqual(stored);
     const bob2 = await mk('bob', 'BOB2', `bob-new-${n}`);
     expect(() => checkPeerIdentity(stored, bob2.identity())).toThrowError(expect.objectContaining({ code: 'IDENTITY_CHANGED' }));
+  });
+
+  it('N receives on an existing session consume zero OTKs and make zero bundle/identity calls', async () => {
+    const { be, alice, bob } = await setup();
+    const a = alice.identity(), b = bob.identity();
+    const first = await alice.encrypt(b, 'm0');
+    expect((await bob.receive([decodeMessage(encodeMessage(first))]))[0]).toMatchObject({ ok: true });
+    await alice.receive([decodeMessage(encodeMessage(await bob.encrypt(a, 'ack')))]);
+    const unused = () => [...be.otks.values()].flat().filter((k) => !k.consumed).length;
+    const before = { otk: unused(), bundle: be.bundleFetches, ident: be.identityFetches };
+    for (let i = 1; i <= 10; i++) {
+      const env = await alice.encrypt(b, `m${i}`);
+      expect((await bob.receive([decodeMessage(encodeMessage(env))]))[0]).toMatchObject({ ok: true, plaintext: `m${i}` });
+      const back = await bob.encrypt(a, `r${i}`);
+      expect((await alice.receive([decodeMessage(encodeMessage(back))]))[0]).toMatchObject({ ok: true });
+    }
+    expect(unused()).toBe(before.otk);
+    expect(be.bundleFetches).toBe(before.bundle);
+    expect(be.identityFetches).toBe(before.ident);
+  });
+
+  it('first session costs exactly one bundle claim; identity lookups never consume OTKs', async () => {
+    const { be, alice, bob } = await setup();
+    const unused = () => be.otks.get('bob')!.filter((k) => !k.consumed).length;
+    const start = unused();
+    await alice.encrypt(bob.identity(), 'hi');
+    expect(be.bundleFetches).toBe(1);
+    expect(unused()).toBe(start - 1);
   });
 });

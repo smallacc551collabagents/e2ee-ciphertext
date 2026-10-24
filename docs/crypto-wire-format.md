@@ -13,4 +13,11 @@ Client rules: signatures are verified by the library before any session is built
 
 Frontend usage: `createOlmAdapter({ userId: userIdFor(username), deviceId, transport: createBackendTransport(http), storeName })`; send with `POST /conversations/:id/messages` body `encodeMessage(await adapter.encrypt(peer, text))`; receive with `adapter.receive(messages.map(decodeMessage))`. Single device per user, so there is one envelope per recipient. Safety numbers: `safetyNumber(me, peer)`; on first contact store the peer identity, then check it with `checkPeerIdentity` (it throws `IDENTITY_CHANGED`, which drives the banner).
 
-Known cost: `keys.query` maps to `GET /keys/bundle`, which consumes one OTK. The bridge reuses that OTK for the following claim. A non-consuming `GET /keys/identity/:username` would reduce waste; it is optional.
+## Key lookups
+
+| library request | endpoint | consumes OTK? | when |
+|---|---|---|---|
+| keys.query | `GET /keys/identity/:username` -> `{ userId, username, identityKey{publicKey,version}, signedPrekey{keyId,publicKey,signature,version} }` (404 if no keys; no `oneTimePrekey` field) | no | only when the peer device isn't already in the encrypted store |
+| keys.claim | `GET /keys/bundle/:username` (PR #13 shape) | yes, exactly one | only when there's no outbound Olm session yet |
+
+Verified peer device keys are cached in the library's encrypted IndexedDB store. Receiving on an existing session makes no key calls, which the tests check.
