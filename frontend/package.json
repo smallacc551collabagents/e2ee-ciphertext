@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
-    "build": "next build",
+    "build": "pnpm --filter @e2ee/crypto build && next build",
     "start": "next start -p 3000",
     "typecheck": "tsc --noEmit",
     "e2e": "playwright test"
   },
   "dependencies": {
+    "@e2ee/crypto": "workspace:*",
     "next": "15",
     "react": "19",
     "react-dom": "19",
