@@ -3,5 +3,5 @@ import { ChatView } from "@/features/chat/ChatView";
 
 export default async function ChatPage() {
   const user = await getSession(); // layout already guarantees a session
-  return <ChatView username={user?.username ?? ""} />;
+  return <ChatView username={user?.username ?? ""} userId={user?.id ?? ""} />;
 }

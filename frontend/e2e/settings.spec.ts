@@ -13,6 +13,14 @@ test("settings: profile, placeholders, sign out", async ({ page }) => {
   await expect(page.getByTestId("devices-coming-soon")).toBeVisible();
   await expect(page.getByRole("switch", { name: "Read receipts" })).toBeDisabled();
   await expect(page.getByText("00000 00000")).toHaveCount(0);
+  const names = ["e2ee-u1::matrix-sdk-crypto", "e2ee-u1::matrix-sdk-crypto-meta", "e2ee-u1-wrap", "e2ee-u1-history", "e2ee-u1-peers", "other-app"];
+  await page.evaluate(async (ns) => {
+    for (const n of ns) await new Promise((r) => { const q = indexedDB.open(n); q.onsuccess = () => { q.result.close(); r(null); }; });
+    localStorage.setItem("e2ee.deviceId.u1", "DEV");
+  }, names);
   await page.getByRole("button", { name: /sign out|log out/i }).last().click();
   await expect(page).toHaveURL(/\/login/);
+  const left = await page.evaluate(async () => ({ dbs: (await indexedDB.databases()).map((d) => d.name), dev: localStorage.getItem("e2ee.deviceId.u1") }));
+  expect(left.dbs).toEqual(["other-app"]); // crypto store + -wrap + caches deleted
+  expect(left.dev).toBeNull();
 });
