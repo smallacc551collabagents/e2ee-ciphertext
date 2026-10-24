@@ -56,3 +56,14 @@ Startup (getting or creating the store key and opening the store) and all ratche
 - The MVP supports a single device per account (see `crypto-decision.md`).
 - The tests use `fake-indexeddb`, and the relay is a test double. All the crypto in the tests is real.
 - The WASM bundle is about 5 MB and has to be lazy-loaded.
+
+## Browser adapter acceptance (E2EE-29)
+
+E2EE-67 (nonce CSP, `strict-dynamic`, `wasm-unsafe-eval`) is live, so identity keys can now be stored in the browser. `packages/crypto/test/browser-adapter.test.ts` checks the acceptance criteria against the backend-shaped fake:
+
+- **Sessions:** two clients establish a session in both directions.
+- **Reload:** after a reload of both clients (`close()` then reopen from the same `storeName`), identities are unchanged and existing sessions are reused, with no new bundle claims.
+- **Private keys stay local:** every outbound request body contains only allow-listed public fields (public keys, signatures, key ids, versions, ciphertext, clientMsgId).
+- **At-rest wrapping key:** it is a non-extractable `CryptoKey` (`exportKey` rejects), and the store key is kept only in AES-GCM-wrapped form.
+
+The limits in "Known limitations" still apply. In particular, the unwrapped store key is in memory while the store is open, and same-origin script (XSS) could drive the adapter. CSP and text-only rendering (E2EE-44) are the mitigations.
