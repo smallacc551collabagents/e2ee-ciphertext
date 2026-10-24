@@ -6,6 +6,7 @@ export class FakeBackend {
   ids = new Map<string, { identityKey: any; signedPrekey: any }>();
   otks = new Map<string, Array<{ keyId: number; publicKey: string; version: number; consumed: boolean }>>();
   messages: any[] = [];
+  acked = new Set<string>();
   bodies: string[] = [];
   bundleFetches = 0;
   identityFetches = 0;
@@ -65,12 +66,33 @@ export class FakeBackend {
       return { userId: `uuid-${target}`, username: target, identityKey: id.identityKey, signedPrekey: id.signedPrekey,
         oneTimePrekey: otk && { keyId: otk.keyId, publicKey: otk.publicKey, version: otk.version } };
     }
-    if (method === 'POST' && path === '/conversations/c1/messages') {
+    const cm = /^\/conversations\/([^/?]+)\/messages(?:\?(.*))?$/.exec(path);
+    if (method === 'POST' && cm && !cm[2]) {
+      const conversationId = decodeURIComponent(cm[1]!);
       if (!/^[A-Za-z0-9_-]{8,64}$/.test(body.clientMsgId)) throw Object.assign(new Error('clientMsgId'), { status: 400 });
       this.canon(body.ciphertext, 32 * 1024); this.ver(body.version);
-      const msg = { id: `m${this.messages.length}`, senderId: user, seq: String(this.messages.length + 1), ...body };
+      const dup = this.messages.find((x) => x.senderId === user && x.clientMsgId === body.clientMsgId);
+      if (dup) return { message: dup, duplicate: true };
+      const seq = String(this.messages.filter((x) => x.conversationId === conversationId).length + 1);
+      const msg = { id: `m${this.messages.length}`, conversationId, senderId: user, seq, createdAt: new Date().toISOString(), ...body };
       this.messages.push(msg);
       return { message: msg, duplicate: false };
+    }
+    if (method === 'GET' && cm) {
+      // PR #13: ascending seq, exclusive `after` cursor, limit 1..100.
+      const q = new URLSearchParams(cm[2] ?? '');
+      const after = BigInt(q.get('after') ?? '0');
+      const limit = Math.min(100, Math.max(1, Number(q.get('limit') ?? '100')));
+      const all = this.messages.filter((x) => x.conversationId === decodeURIComponent(cm[1]!) && BigInt(x.seq) > after)
+        .sort((x, y) => Number(BigInt(x.seq) - BigInt(y.seq)));
+      const page = all.slice(0, limit);
+      return { messages: page, nextCursor: page.length ? page[page.length - 1].seq : null, hasMore: all.length > limit };
+    }
+    if (method === 'POST' && path === '/messages/ack') {
+      if (!Array.isArray(body.messageIds) || body.messageIds.length > 500) throw Object.assign(new Error('ack'), { status: 400 });
+      let acked = 0;
+      for (const id of body.messageIds) if (!this.acked.has(`${user}:${id}`) && this.messages.some((x) => x.id === id)) { this.acked.add(`${user}:${id}`); acked++; }
+      return { acked };
     }
     throw Object.assign(new Error(`unrouted ${method} ${path}`), { status: 404 });
   }
