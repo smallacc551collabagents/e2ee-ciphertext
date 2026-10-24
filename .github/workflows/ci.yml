@@ -32,3 +32,7 @@ jobs:
         run: pnpm -r --if-present build
       - name: Test
         run: pnpm -r --if-present test
+      - name: Crypto production gate (E2EE-62)
+        run: pnpm run gate:crypto
+      - name: Production bundle scan (E2EE-44/62)
+        run: pnpm run gate:bundle
