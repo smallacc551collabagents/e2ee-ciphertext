@@ -2,6 +2,15 @@ import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { CryptoError, createOlmAdapter, type CiphertextEnvelope, type CryptoAdapter } from '../src/index.js';
 import { InMemoryRelay } from './relay.js';
+import { memGate } from './mem-gate.js';
+
+describe('createOlmAdapter options', () => {
+  it('throws INVALID_OPTIONS without an identityGate', async () => {
+    const relay = new InMemoryRelay();
+    const bad = { userId: '@x:e2ee.test', deviceId: 'X1', transport: relay.transport(), storeName: 'no-gate' };
+    await expect(createOlmAdapter(bad as never)).rejects.toMatchObject({ code: 'INVALID_OPTIONS' });
+  });
+});
 
 let n = 0;
 async function pair() {
@@ -10,7 +19,7 @@ async function pair() {
   const aliceAddr = { userId: '@alice:e2ee.test', deviceId: 'ALICE1' };
   const bobAddr = { userId: '@bob:e2ee.test', deviceId: 'BOB1' };
   const mk = (a: typeof aliceAddr, name: string) =>
-    createOlmAdapter({ ...a, transport: relay.transport(), storeName: `${name}-${id}` });
+    createOlmAdapter({ ...a, transport: relay.transport(), storeName: `${name}-${id}`, identityGate: memGate() });
   const alice = await mk(aliceAddr, 'alice');
   const bob = await mk(bobAddr, 'bob');
   await alice.sync();

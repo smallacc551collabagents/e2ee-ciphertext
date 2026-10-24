@@ -1,4 +1,5 @@
 import 'fake-indexeddb/auto';
+import { memGate } from './mem-gate.js';
 import { describe, expect, it } from 'vitest';
 import { FakeBackend } from './fake-backend.js';
 import {
@@ -15,7 +16,7 @@ async function setup() {
   const mk = async (u: string, dev: string, storeName = `${u}-ig-${id}`, gated = false) => {
     const a = await createOlmAdapter({
       userId: userIdFor(u), deviceId: dev, transport: createBackendTransport(be.http(u)), storeName,
-      ...(gated ? { identityGate: createIdentityGate(store) } : {}),
+      identityGate: gated ? createIdentityGate(store) : memGate(),
     });
     await a.sync();
     return a;

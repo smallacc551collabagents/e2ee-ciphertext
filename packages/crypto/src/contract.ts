@@ -124,7 +124,8 @@ export type CryptoErrorCode =
   | 'DECRYPT_FAILED'
   | 'IDENTITY_CHANGED'
   | 'STORAGE_FAILED'
-  | 'TRANSPORT_FAILED';
+  | 'TRANSPORT_FAILED'
+  | 'INVALID_OPTIONS';
 
 /** Typed error. Messages never contain plaintext or key material. */
 export class CryptoError extends Error {
