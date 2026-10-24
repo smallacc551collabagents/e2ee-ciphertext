@@ -33,6 +33,23 @@ interface PublishBody {
 const err = (reply: FastifyReply, code: number, error: string, message: string) =>
   reply.code(code).send({ error, message });
 
+/** Thrown INSIDE tx callbacks so the transaction rolls back; mapped to HTTP outside the tx. */
+class ApiError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string) { super(message); }
+}
+/** Run a transaction and translate ApiError into a clean JSON reply (after rollback). */
+async function txReply<T>(reply: FastifyReply, fn: (c: Queryable) => Promise<T>): Promise<T | FastifyReply> {
+  try {
+    return await tx(fn);
+  } catch (e) {
+    if (e instanceof ApiError) return err(reply, e.status, e.code, e.message);
+    throw e;
+  }
+}
+const isUniqueViolation = (e: unknown, constraint: string) =>
+  typeof e === "object" && e !== null && (e as { code?: string }).code === "23505" &&
+  ((e as { constraint?: string }).constraint ?? constraint) === constraint;
+
 /** Decode strict base64; returns null if it doesn't round-trip (rejects junk padding). */
 function bytes(s: string, max: number): Buffer | null {
   const b = Buffer.from(s, "base64");
@@ -81,10 +98,10 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     if (otks.some((k) => !k.b)) return err(reply, 400, "invalid_key", "Key material must be canonical base64 within size limits.");
     if (new Set(otks.map((k) => k.keyId)).size !== otks.length) return err(reply, 400, "duplicate_key_id", "Duplicate one-time prekey keyId in batch.");
 
-    return tx(async (c) => {
+    return txReply(reply, async (c) => {
       const cur = await c.query(`SELECT 1 FROM identity_keys WHERE user_id = $1 FOR UPDATE`, [uid]);
       const exists = (cur.rowCount ?? 0) > 0;
-      if (!exists && (!ik || !spk)) return err(reply, 400, "identity_required", "First publish must include identityKey and signedPrekey.");
+      if (!exists && (!ik || !spk)) throw new ApiError(400, "identity_required", "First publish must include identityKey and signedPrekey.");
       if (ik && spk && sig && identityKey && signedPrekey) {
         await c.query(
           `INSERT INTO identity_keys (user_id, identity_key, identity_key_version, signed_prekey_id, signed_prekey, signed_prekey_signature, signed_prekey_version)
@@ -96,23 +113,23 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
         // A new identity key invalidates every outstanding one-time prekey.
         if (exists) await c.query(`DELETE FROM one_time_prekeys WHERE user_id = $1 AND consumed_at IS NULL`, [uid]);
       } else if (ik || spk) {
-        if (ik && identityKey) return err(reply, 400, "signed_prekey_required", "Replacing identityKey requires a new signedPrekey.");
+        if (ik && identityKey) throw new ApiError(400, "signed_prekey_required", "Replacing identityKey requires a new signedPrekey.");
         if (spk && sig && signedPrekey) await c.query(
           `UPDATE identity_keys SET signed_prekey_id = $2, signed_prekey = $3, signed_prekey_signature = $4, signed_prekey_version = $5, updated_at = now() WHERE user_id = $1`,
           [uid, signedPrekey.keyId, spk, sig, signedPrekey.version]);
       }
       if (otks.length) {
         const n = await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM one_time_prekeys WHERE user_id = $1 AND consumed_at IS NULL`, [uid]);
-        if ((n.rows[0]?.n ?? 0) + otks.length > LIMITS.prekeyPool) return err(reply, 409, "prekey_pool_full", `At most ${LIMITS.prekeyPool} unused one-time prekeys.`);
+        if ((n.rows[0]?.n ?? 0) + otks.length > LIMITS.prekeyPool) throw new ApiError(409, "prekey_pool_full", `At most ${LIMITS.prekeyPool} unused one-time prekeys.`);
         const r = await c.query(
           `INSERT INTO one_time_prekeys (id, user_id, key_id, public_key, version)
            SELECT gen_random_uuid(), $1, k, p, v FROM unnest($2::int[], $3::bytea[], $4::int[]) AS t(k, p, v)
            ON CONFLICT (user_id, key_id) DO NOTHING`,
           [uid, otks.map((k) => k.keyId), otks.map((k) => k.b), otks.map((k) => k.version)]);
-        if ((r.rowCount ?? 0) !== otks.length) throw Object.assign(new Error("One-time prekey keyId already used."), { statusCode: 409 });
+        if ((r.rowCount ?? 0) !== otks.length) throw new ApiError(409, "prekey_id_conflict", "One-time prekey keyId already used.");
       }
       const left = await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM one_time_prekeys WHERE user_id = $1 AND consumed_at IS NULL`, [uid]);
-      return reply.send({ oneTimePrekeyCount: left.rows[0]?.n ?? 0 });
+      return { oneTimePrekeyCount: left.rows[0]?.n ?? 0 };
     });
   });
 
@@ -125,18 +142,18 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     schema: { params: { type: "object", required: ["username"], properties: { username: { type: "string", pattern: USERNAME_RE } } } },
     config: { rateLimit: { max: 60, timeWindow: "1 minute", keyGenerator: (r) => `bundle:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
-    return tx(async (c) => {
+    return txReply(reply, async (c) => {
       const ik = await c.query<{ user_id: string; username: string; identity_key: Buffer; identity_key_version: number; signed_prekey_id: number; signed_prekey: Buffer; signed_prekey_signature: Buffer; signed_prekey_version: number }>(
         `SELECT k.*, u.username FROM identity_keys k JOIN users u ON u.id = k.user_id WHERE u.username = $1`, [normalizeUsername(req.params.username)]);
       const k = ik.rows[0];
-      if (!k) return err(reply, 404, "not_found", "No keys published for that user.");
+      if (!k) throw new ApiError(404, "not_found", "No keys published for that user.");
       // Atomic single-use hand-out; SKIP LOCKED so concurrent fetchers never get the same key.
       const otk = await c.query<{ key_id: number; public_key: Buffer; version: number }>(
         `UPDATE one_time_prekeys SET consumed_at = now() WHERE id = (
            SELECT id FROM one_time_prekeys WHERE user_id = $1 AND consumed_at IS NULL ORDER BY created_at, key_id LIMIT 1 FOR UPDATE SKIP LOCKED)
          RETURNING key_id, public_key, version`, [k.user_id]);
       const o = otk.rows[0];
-      return reply.send({
+      return ({
         userId: k.user_id, username: k.username,
         identityKey: { publicKey: enc(k.identity_key), version: k.identity_key_version },
         signedPrekey: { keyId: k.signed_prekey_id, publicKey: enc(k.signed_prekey), signature: enc(k.signed_prekey_signature), version: k.signed_prekey_version },
@@ -196,9 +213,12 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     const uid = me(req).id;
     const blob = bytes(req.body.ciphertext, LIMITS.ciphertextBytes);
     if (!blob) return err(reply, 400, "invalid_ciphertext", "Ciphertext must be canonical base64 within size limits.");
-    return tx(async (c) => {
-      if (!(await isMember(c, req.params.id, uid))) return err(reply, 404, "not_found", "Conversation not found.");
-      const dup = await c.query<MsgRow>(`SELECT * FROM messages WHERE conversation_id = $1 AND sender_id = $2 AND client_msg_id = $3`, [req.params.id, uid, req.body.clientMsgId]);
+    const findDup = (c: Queryable) => c.query<MsgRow>(
+      `SELECT * FROM messages WHERE conversation_id = $1 AND sender_id = $2 AND client_msg_id = $3`, [req.params.id, uid, req.body.clientMsgId]);
+    try {
+      return await txReply(reply, async (c) => {
+      if (!(await isMember(c, req.params.id, uid))) throw new ApiError(404, "not_found", "Conversation not found.");
+      const dup = await findDup(c);
       if (dup.rows[0]) return reply.code(200).send({ message: msgDto(dup.rows[0]), duplicate: true });
       // Row lock on the conversation serializes seq allocation => gap-free, monotonic.
       const s = await c.query<{ last_seq: string }>(`UPDATE conversations SET last_seq = last_seq + 1 WHERE id = $1 RETURNING last_seq`, [req.params.id]);
@@ -211,7 +231,15 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
         `INSERT INTO message_deliveries (message_id, recipient_id) SELECT $1, user_id FROM conversation_members WHERE conversation_id = $2 AND user_id <> $3`,
         [row.id, req.params.id, uid]);
       return reply.code(201).send({ message: msgDto(row), duplicate: false });
-    });
+      });
+    } catch (e) {
+      // Concurrent retry with the same clientMsgId lost the race: tx rolled back
+      // (incl. seq bump); return the winner's row exactly like a sequential retry.
+      if (!isUniqueViolation(e, "messages_conversation_id_sender_id_client_msg_id_key")) throw e;
+      const dup = (await findDup(q())).rows[0];
+      if (!dup) throw e;
+      return reply.code(200).send({ message: msgDto(dup), duplicate: true });
+    }
   });
 
   app.get<{ Params: { id: string }; Querystring: { after?: string; limit?: string } }>("/conversations/:id/messages", {

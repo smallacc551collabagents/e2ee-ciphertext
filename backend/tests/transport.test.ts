@@ -9,8 +9,15 @@ import { setTestDb, type Queryable } from "../src/database/db.js";
 import { buildApp } from "../src/app.js";
 
 const pg = new PGlite();
+// Race simulation: when set, the next idempotency pre-check "misses" (as if a concurrent
+// request inserted the same clientMsgId between our SELECT and INSERT).
+let hideNextDupCheck = false;
 const wrap = (c: PGlite | Transaction): Queryable => ({
   async query(text: string, values?: unknown[]) {
+    if (hideNextDupCheck && text.startsWith("SELECT * FROM messages WHERE conversation_id = $1 AND sender_id")) {
+      hideNextDupCheck = false;
+      return { rows: [], rowCount: 0 };
+    }
     const r = await c.query(text, values as never[]);
     return { rows: r.rows as never[], rowCount: Math.max(r.affectedRows ?? 0, r.rows.length) };
   },
@@ -124,4 +131,40 @@ test("messages: append, idempotency, seq, cursor, authz, ack", async () => {
   assert.equal((await call(alice, "POST", "/messages/ack", { messageIds: [id1] })).json().acked, 0, "sender has no delivery row");
   assert.equal((await call(bob, "POST", "/messages/ack", { messageIds: [id1] })).json().acked, 1);
   assert.equal((await call(bob, "POST", "/messages/ack", { messageIds: [id1] })).json().acked, 0, "ack idempotent");
+});
+
+test("keys: failed publish rolls back fully (no partial identity replacement)", async () => {
+  const carol = await signup("carol");
+  assert.equal((await publish(carol, [1, 2, 3])).statusCode, 200);
+  const before = (await call(alice, "GET", "/keys/bundle/carol")).json(); // consumes keyId 1
+  assert.equal(before.oneTimePrekey.keyId, 1);
+  // New identity + reuse of consumed keyId 1 => 409 AFTER the upsert + prekey delete ran in the tx.
+  const bad = await call(carol, "POST", "/keys/publish", {
+    identityKey: { publicKey: b64(33, 9), version: 2 },
+    signedPrekey: { keyId: 2, publicKey: b64(33, 9), signature: b64(64, 9), version: 2 },
+    oneTimePrekeys: [{ keyId: 1, publicKey: b64(33, 9), version: 2 }],
+  });
+  assert.equal(bad.statusCode, 409);
+  assert.equal(bad.json().error, "prekey_id_conflict");
+  assert.equal((await call(carol, "GET", "/keys/count")).json().oneTimePrekeyCount, 2, "existing one-time prekeys intact");
+  const after = (await call(alice, "GET", "/keys/bundle/carol")).json();
+  assert.equal(after.identityKey.publicKey, b64(33), "prior identity key intact");
+  assert.equal(after.identityKey.version, 1);
+  assert.equal(after.signedPrekey.keyId, 1);
+});
+
+test("messages: concurrent duplicate clientMsgId returns duplicate, not 500", async () => {
+  const send = () => call(alice, "POST", `/conversations/${convId}/messages`, { clientMsgId: "race-msg-0001", ciphertext: b64(50), version: 1 });
+  const first = await send();
+  assert.equal(first.statusCode, 201);
+  hideNextDupCheck = true; // second request "doesn't see" the first => hits the unique constraint
+  const second = await send();
+  assert.equal(hideNextDupCheck, false, "race path exercised");
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.json().duplicate, true);
+  assert.equal(second.json().message.id, first.json().message.id);
+  const msgs = (await call(bob, "GET", `/conversations/${convId}/messages?after=${first.json().message.seq}`)).json().messages;
+  assert.equal(msgs.length, 0, "no extra row and the seq bump was rolled back");
+  const next = await call(alice, "POST", `/conversations/${convId}/messages`, { clientMsgId: "race-msg-0002", ciphertext: b64(50), version: 1 });
+  assert.equal(next.json().message.seq, String(Number(first.json().message.seq) + 1), "seq stays gap-free");
 });
