@@ -37,10 +37,13 @@ function tokenFrom(req: FastifyRequest): string | undefined {
 const isProd = () => process.env.NODE_ENV === "production";
 
 // E2EE-68 / ARCH-013: per-IP limit on signin+signup (IP trusted from x-forwarded-for
-// only with a valid x-proxy-secret). In-memory: resets per cold start; Redis later.
+// only with a valid x-proxy-secret). E2EE-75: counted in the shared Postgres store.
+// Fails CLOSED: if the limiter store errors, the request errors (500) rather than
+// letting credential guessing through unthrottled. Signin/signup need the DB anyway.
 const ipLimit = {
   rateLimit: {
     max: 20,
+    skipOnError: false,
     timeWindow: "15 minutes",
     keyGenerator: (req: FastifyRequest) => `auth:${clientIp(req)}`,
     errorResponseBuilder: (_req: FastifyRequest, ctx: { after: string; statusCode: number }) => ({
@@ -64,12 +67,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: Creds }>("/signin", { schema: { body: credsBody }, config: ipLimit }, async (req, reply) => {
     const uname = auth.normalizeUsername(req.body.username);
     // Per-username lockout: same 429 whether or not the account exists.
-    const locked = usernameLocked(uname);
+    const locked = await usernameLocked(uname);
     if (locked) return tooMany(reply, locked);
     const row = await auth.findUserForLogin(uname);
     const ok = await auth.verifyPassword(row?.password_hash, req.body.password);
-    if (!row || !ok) recordFailure(uname);
-    else recordSuccess(uname);
+    if (!row || !ok) await recordFailure(uname);
+    else await recordSuccess(uname);
     if (!row || !ok) return reply.code(401).send({ error: "invalid_credentials", message: "Invalid username or password." });
     const session = await auth.createSession(row.id);
     return reply.send({
