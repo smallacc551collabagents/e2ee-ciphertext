@@ -52,6 +52,29 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   }, [adapter]);
   useEffect(() => { setSafety(null); setShowInfo(false); }, [activeId]);
 
+  // No push yet: poll with the after-cursor on focus, reconnect, and every few seconds while visible.
+  useEffect(() => {
+    if (!activeId || adapter.id !== "live") return;
+    let busy = false;
+    const poll = async () => {
+      if (busy || document.visibilityState !== "visible") return;
+      busy = true;
+      try {
+        const fresh = await adapter.listMessages(activeId);
+        setMsgs((s) => {
+          if (s.state !== "ready") return { state: "ready", data: fresh };
+          const known = new Set(fresh.map((m) => m.clientId ?? m.id));
+          return { state: "ready", data: [...fresh, ...s.data.filter((m) => m.status !== "sent" && !known.has(m.clientId ?? m.id))] };
+        });
+      } catch { /* keep current view; next tick retries */ } finally { busy = false; }
+    };
+    const t = setInterval(() => void poll(), 4000);
+    window.addEventListener("focus", poll);
+    window.addEventListener("online", poll);
+    document.addEventListener("visibilitychange", poll);
+    return () => { clearInterval(t); window.removeEventListener("focus", poll); window.removeEventListener("online", poll); document.removeEventListener("visibilitychange", poll); };
+  }, [activeId, adapter]);
+
   async function acceptIdentity() {
     if (!activeId || !adapter.acceptNewIdentity) return;
     await adapter.acceptNewIdentity(activeId);

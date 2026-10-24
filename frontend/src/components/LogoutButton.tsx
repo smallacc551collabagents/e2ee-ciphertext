@@ -2,6 +2,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { signout } from "@/lib/api/client";
+import { wipeLocalE2EE } from "@/features/chat/data/wipe";
 
 export function LogoutButton({ className = "" }: { className?: string }) {
   const router = useRouter();
@@ -13,6 +14,7 @@ export function LogoutButton({ className = "" }: { className?: string }) {
         await signout().catch(() => undefined); // backend clears e2ee_session via the first-party proxy
         // Belt and braces: same-origin POST that deletes the cookie locally (never a GET).
         await fetch("/session/expired", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
+        await wipeLocalE2EE().catch(() => undefined); // delete <storeName>, <storeName>-wrap and caches
         router.replace("/login");
         router.refresh();
       }}>
