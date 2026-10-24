@@ -30,8 +30,40 @@ function toLogin(req: NextRequest, next?: string, clear = false) {
   return res;
 }
 
+// E2EE-67: per-request nonce CSP. 'wasm-unsafe-eval' allows the crypto WASM (no JS eval).
+export function buildCsp(nonce: string, dev = process.env.NODE_ENV !== "production"): string {
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval'${dev ? " 'unsafe-eval'" : ""}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    `connect-src 'self'${dev ? " ws:" : ""}`,
+    "worker-src 'self' blob:",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ].join("; ");
+}
+
 export async function middleware(req: NextRequest) {
+  const nonce = btoa(crypto.randomUUID());
+  const csp = buildCsp(nonce);
+  const res = await route(req, csp);
+  res.headers.set("Content-Security-Policy", csp);
+  return res;
+}
+
+async function route(req: NextRequest, csp: string): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
+  const next = () => {
+    const headers = new Headers(req.headers);
+    headers.set("x-nonce", csp.match(/'nonce-([^']+)'/)![1]!);
+    headers.set("Content-Security-Policy", csp);
+    return NextResponse.next({ request: { headers } });
+  };
+  if (!matches(pathname, [...PRIVATE, ...AUTH_PAGES]) && pathname !== "/") return next();
   const state = await sessionState(req);
   const clear = state === "invalid";
 
@@ -40,12 +72,14 @@ export async function middleware(req: NextRequest) {
   if (matches(pathname, AUTH_PAGES)) {
     if (state === "valid") return NextResponse.redirect(new URL("/chat", req.url));
     if (clear) {
-      const res = NextResponse.next();
+      const res = next();
       res.cookies.delete(SESSION_COOKIE);
       return res;
     }
   }
-  return NextResponse.next();
+  return next();
 }
 
-export const config = { matcher: ["/", "/chat/:path*", "/settings/:path*", "/login", "/signup"] };
+export const config = {
+  matcher: [{ source: "/((?!api|session|_next/static|_next/image|favicon.ico).*)", missing: [{ type: "header", key: "next-router-prefetch" }] }],
+};
