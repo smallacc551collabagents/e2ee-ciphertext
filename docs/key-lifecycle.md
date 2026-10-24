@@ -67,3 +67,36 @@ E2EE-67 (nonce CSP, `strict-dynamic`, `wasm-unsafe-eval`) is live, so identity k
 - **At-rest wrapping key:** it is a non-extractable `CryptoKey` (`exportKey` rejects), and the store key is kept only in AES-GCM-wrapped form.
 
 The limits in "Known limitations" still apply. In particular, the unwrapped store key is in memory while the store is open, and same-origin script (XSS) could drive the adapter. CSP and text-only rendering (E2EE-44) are the mitigations.
+
+## Device revocation & recovery (E2EE-50 / P5-4)
+
+Code: `packages/crypto/src/revocation.ts` (`withRevocationCheck`), tests: `packages/crypto/test/revocation.test.ts`.
+
+**Model.** One active device (identity) per user (`identity_keys` is keyed by user). A device is revoked when:
+1. *Recovery / new device*: the user signs in on a new device and publishes a new identity
+   (`POST /keys/publish` with `identityKey`+`signedPrekey`); the server replaces the identity and deletes the
+   old device's unused one-time prekeys, so no new session can be established with the old device.
+2. *Removal*: the server stops publishing an identity for the user (`GET /keys/identity/:username` → 404).
+3. *Logout / lost device (local)*: `deleteLocalCryptoState(storeName)` wipes the Olm store, its wrapping key and
+   encrypted history on that browser; sessions are revoked server-side via `/signout` / password reset.
+
+**Enforcement (blocks future delivery).** The frontend must build the adapter gate as
+`withRevocationCheck(createIdentityGate(store), { http, store })`. Before every encrypt the target device is
+compared with the currently published identity (cached ≤ 5 min, `REVOCATION_CHECK_MS`):
+- not published → `NO_DEVICE` (revoked); replaced → `IDENTITY_CHANGED` and recorded as `pendingChange`, which
+  blocks all devices of that user until the safety number is re-verified (`acceptNewIdentity`);
+- key server unreachable on a stale check → `TRANSPORT_FAILED` (fail closed, message stays in the outbox).
+Existing Olm sessions with a revoked device are therefore never used for new messages by honest clients.
+
+**Recovery.** A new device starts with a fresh identity: peers see a safety-number change and must re-verify.
+There is no key backup in the MVP, so **message history is not recoverable on a new device** (by design).
+
+**Limits (documented, accepted for MVP).**
+- Up to `REVOCATION_CHECK_MS` (5 min) window where a sender may still encrypt to a just-revoked device.
+- Ciphertext already queued on the server for the old device before revocation can still be fetched by whoever
+  holds that device and its session (backend should drop undelivered `message_deliveries` for a replaced identity — Backend follow-up).
+- A malicious server can withhold revocation (keep publishing the old identity) or fake one (denial of service);
+  it cannot introduce a new device without triggering the safety-number change.
+- A stolen, still-unlocked browser keeps local history until the user revokes it from another device or the data is wiped;
+  remote wipe is out of scope.
+- Multi-device per user is not supported; this design changes with the group protocol decision (E2EE-53).

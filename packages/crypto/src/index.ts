@@ -8,3 +8,4 @@ export * from './peer-trust.js';
 export { toDisplayText, DISPLAY_MAX_CHARS } from './display.js';
 export * from './history-store.js';
 export * from './attachments.js';
+export * from './revocation.js';
