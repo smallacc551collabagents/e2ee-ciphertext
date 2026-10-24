@@ -3,7 +3,8 @@ import * as auth from "../services/auth.js";
 import { clientIp } from "../utils/clientIp.js";
 import { recordFailure, recordSuccess, usernameLocked } from "../utils/usernameLimiter.js";
 
-export const SESSION_COOKIE = "e2ee_session";
+import { SESSION_COOKIE } from "../middleware/requireAuth.js";
+export { SESSION_COOKIE };
 
 const username = { type: "string", pattern: auth.USERNAME_RE } as const;
 const password = { type: "string", minLength: auth.PASSWORD_MIN, maxLength: auth.PASSWORD_MAX } as const;

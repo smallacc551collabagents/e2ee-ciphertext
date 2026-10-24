@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
-import { db } from "../database/db.js";
+import { db, q } from "../database/db.js";
 
 // argon2id via a vetted implementation (OWASP 2024 baseline: m=19MiB, t=2, p=1).
 const ARGON = { algorithm: 2 /* Algorithm.Argon2id (const enum) */ as const, memoryCost: 19456, timeCost: 2, parallelism: 1 };
@@ -32,7 +32,7 @@ const toPublic = (r: { id: string; username: string; created_at: Date }): Public
 
 export async function createUser(username: string, password: string): Promise<PublicUser | null> {
   const ph = await hashPassword(password);
-  const r = await db().query(
+  const r = await q().query(
     `INSERT INTO users (id, username, password_hash, updated_at)
      VALUES (gen_random_uuid(), $1, $2, now())
      ON CONFLICT (username) DO NOTHING RETURNING id, username, created_at`,
@@ -42,7 +42,7 @@ export async function createUser(username: string, password: string): Promise<Pu
 }
 
 export async function findUserForLogin(username: string) {
-  const r = await db().query(
+  const r = await q().query(
     `SELECT id, username, password_hash, created_at FROM users WHERE username = $1`, [username]);
   return r.rows[0] as { id: string; username: string; password_hash: string; created_at: Date } | undefined;
 }
@@ -50,27 +50,27 @@ export async function findUserForLogin(username: string) {
 export async function createSession(userId: string): Promise<{ token: string; expiresAt: Date }> {
   const token = newToken();
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-  await db().query(
+  await q().query(
     `INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (gen_random_uuid(), $1, $2, $3)`,
     [userId, sha256(token), expiresAt]);
   return { token, expiresAt };
 }
 
 export async function userForSession(token: string): Promise<PublicUser | null> {
-  const r = await db().query(
+  const r = await q().query(
     `SELECT u.id, u.username, u.created_at FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = $1 AND s.expires_at > now()`, [sha256(token)]);
   return r.rows[0] ? toPublic(r.rows[0]) : null;
 }
 
 export async function deleteSession(token: string): Promise<void> {
-  await db().query(`DELETE FROM sessions WHERE token_hash = $1`, [sha256(token)]);
+  await q().query(`DELETE FROM sessions WHERE token_hash = $1`, [sha256(token)]);
 }
 
 /** Returns the raw reset token if the user exists, else null. Caller must not reveal which. */
 export async function createResetToken(username: string): Promise<string | null> {
   const token = newToken();
-  const r = await db().query(
+  const r = await q().query(
     `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at)
      SELECT gen_random_uuid(), id, $2, $3 FROM users WHERE username = $1 RETURNING id`,
     [username, sha256(token), new Date(Date.now() + RESET_TTL_MS)]);
