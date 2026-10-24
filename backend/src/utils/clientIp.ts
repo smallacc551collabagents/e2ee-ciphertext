@@ -1,34 +1,41 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 
+const sha256 = (v: string): Buffer => createHash("sha256").update(v, "utf8").digest();
+
 /** Constant-time check of the x-proxy-secret header against PROXY_SHARED_SECRET.
+ *  Both sides are SHA-256 hashed first, so timingSafeEqual always compares two
+ *  32-byte digests: no length pre-check, and the secret's length is not leaked.
  *  If the env var is unset/empty, the forwarded IP is NEVER trusted. */
 export function hasValidProxySecret(req: FastifyRequest): boolean {
   const expected = process.env.PROXY_SHARED_SECRET;
   if (!expected) return false;
   const got = req.headers["x-proxy-secret"];
   if (typeof got !== "string" || got.length === 0) return false;
-  const a = Buffer.from(got, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  // Length guard: timingSafeEqual throws on length mismatch. Compare against
-  // itself to keep timing roughly uniform, then fail.
-  if (a.length !== b.length) {
-    timingSafeEqual(b, b);
-    return false;
-  }
-  return timingSafeEqual(a, b);
+  return timingSafeEqual(sha256(got), sha256(expected));
 }
 
-/** Real client IP for rate limiting.
- *  Only when the request carries a valid x-proxy-secret do we read x-forwarded-for.
- *  Our frontend proxy (/api/[...path]) OVERWRITES x-forwarded-for with the single real
- *  client IP, so we take the FIRST (leftmost) entry. Otherwise: socket remote address. */
+const firstHeader = (v: string | string[] | undefined): string | undefined => {
+  const raw = Array.isArray(v) ? v[0] : v;
+  const first = raw?.split(",")[0]?.trim();
+  return first || undefined;
+};
+
+/** Real client IP for rate limiting (ARCH-019).
+ *  1. Valid x-proxy-secret: trust x-forwarded-for (our /api/[...path] proxy OVERWRITES it
+ *     with the single real client IP, so take the leftmost entry).
+ *  2. Otherwise NEVER read the client-spoofable x-forwarded-for. Use Vercel's edge-set
+ *     x-real-ip, then x-vercel-forwarded-for, and only then the socket address (on Vercel
+ *     the socket is Vercel infra, which would put every client in one bucket). */
 export function clientIp(req: FastifyRequest): string {
   if (hasValidProxySecret(req)) {
-    const xff = req.headers["x-forwarded-for"];
-    const raw = Array.isArray(xff) ? xff[0] : xff;
-    const first = raw?.split(",")[0]?.trim();
-    if (first) return first;
+    const fwd = firstHeader(req.headers["x-forwarded-for"]);
+    if (fwd) return fwd;
   }
-  return req.socket.remoteAddress ?? "unknown";
+  return (
+    firstHeader(req.headers["x-real-ip"]) ??
+    firstHeader(req.headers["x-vercel-forwarded-for"]) ??
+    req.socket.remoteAddress ??
+    "unknown"
+  );
 }

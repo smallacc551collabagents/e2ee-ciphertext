@@ -32,6 +32,14 @@ export function buildApp(): FastifyInstance {
     allowedHeaders: ["Content-Type"],
     maxAge: 600,
   });
+  // Security headers on every response (API/JSON only, so a strict CSP is safe).
+  // onSend runs for CORS preflight replies too; these headers don't affect CORS.
+  app.addHook("onSend", async (_req, reply, payload) => {
+    void reply.header("X-Content-Type-Options", "nosniff");
+    void reply.header("X-Frame-Options", "DENY");
+    void reply.header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+    return payload;
+  });
   void app.register(cookie);
   // Rate limiting is opt-in per route (global: false); see routes/auth.ts.
   // In-memory store: resets per serverless cold start — acceptable interim, Redis later.
