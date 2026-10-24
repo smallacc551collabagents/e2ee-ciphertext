@@ -15,7 +15,8 @@
     "clean": "rm -rf dist .vercel tsconfig.tsbuildinfo",
     "build:clean": "pnpm run clean && pnpm run prisma:generate && pnpm run build",
     "migrate:deploy": "prisma migrate deploy",
-    "migrate:status": "prisma migrate status"
+    "migrate:status": "prisma migrate status",
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@e2ee/shared": "workspace:*",
@@ -29,6 +30,7 @@
     "prisma": "5.22.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
     "@types/pg": "^8",
     "tsx": "^4.19.0"
   },

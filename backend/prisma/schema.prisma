@@ -1,7 +1,8 @@
-// Identity layer only (users, sessions, password reset tokens).
-// The E2EE crypto-dependent schema (devices, prekeys, envelopes) stays frozen
-// until the Phase 1 contract freeze. Never add plaintext message bodies or
-// private/session/file keys here. Only hashes of secrets are stored.
+// Identity layer (users, sessions, reset tokens) + Phase 1 transport layer.
+// The server stores ONLY public key material and opaque ciphertext, each as raw
+// bytes plus an integer `version`; their internal format is owned by packages/crypto.
+// Never add plaintext message bodies or private/session/file keys here.
+// Migrations must be strictly additive (prod auto-migrates on merge to main).
 
 generator client {
   provider      = "prisma-client-js"
@@ -22,6 +23,11 @@ model User {
   updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   sessions     Session[]
   resetTokens  PasswordResetToken[]
+  identityKey  IdentityKey?
+  oneTimeKeys  OneTimePrekey[]
+  memberships  ConversationMember[]
+  sentMessages Message[]
+  deliveries   MessageDelivery[]
 
   @@map("users")
 }
@@ -50,4 +56,95 @@ model PasswordResetToken {
 
   @@index([userId])
   @@map("password_reset_tokens")
+}
+
+/// Public identity key + current signed prekey (one row per user; Phase 1 = single device).
+model IdentityKey {
+  userId                String   @id @map("user_id") @db.Uuid
+  identityKey           Bytes    @map("identity_key")
+  identityKeyVersion    Int      @map("identity_key_version")
+  signedPrekeyId        Int      @map("signed_prekey_id")
+  signedPrekey          Bytes    @map("signed_prekey")
+  signedPrekeySignature Bytes    @map("signed_prekey_signature")
+  signedPrekeyVersion   Int      @map("signed_prekey_version")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("identity_keys")
+}
+
+/// Pool of PUBLIC one-time prekeys; each handed out at most once (consumed_at set atomically).
+model OneTimePrekey {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  keyId      Int       @map("key_id")
+  publicKey  Bytes     @map("public_key")
+  version    Int
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, keyId])
+  @@index([userId, consumedAt])
+  @@map("one_time_prekeys")
+}
+
+model Conversation {
+  id        String               @id @default(uuid()) @db.Uuid
+  /// "direct" now; "group" is a later extension (membership table is already N-ary).
+  kind      String               @default("direct")
+  /// For direct chats: "<lowUserId>:<highUserId>" — makes create idempotent. NULL for groups.
+  directKey String?              @unique @map("direct_key")
+  /// Last allocated per-conversation message sequence number.
+  lastSeq   BigInt               @default(0) @map("last_seq")
+  createdAt DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  members   ConversationMember[]
+  messages  Message[]
+
+  @@map("conversations")
+}
+
+model ConversationMember {
+  conversationId String       @map("conversation_id") @db.Uuid
+  userId         String       @map("user_id") @db.Uuid
+  joinedAt       DateTime     @default(now()) @map("joined_at") @db.Timestamptz(3)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_members")
+}
+
+/// Opaque ciphertext envelope only — never plaintext.
+model Message {
+  id             String            @id @default(uuid()) @db.Uuid
+  conversationId String            @map("conversation_id") @db.Uuid
+  senderId       String            @map("sender_id") @db.Uuid
+  seq            BigInt
+  /// Client-generated id; (conversation, sender, client_msg_id) unique => idempotent retries.
+  clientMsgId    String            @map("client_msg_id")
+  ciphertext     Bytes
+  version        Int
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         User              @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  deliveries     MessageDelivery[]
+
+  @@unique([conversationId, seq])
+  @@unique([conversationId, senderId, clientMsgId])
+  @@map("messages")
+}
+
+model MessageDelivery {
+  messageId   String    @map("message_id") @db.Uuid
+  recipientId String    @map("recipient_id") @db.Uuid
+  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(3)
+  message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  recipient   User      @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, recipientId])
+  @@index([recipientId, deliveredAt])
+  @@map("message_deliveries")
 }
