@@ -202,6 +202,32 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
     expect(bob2.groups.isWaiting(G)).toBe(false);
   });
 
+  it('member first seen via the group: TOFU shares immediately; a later device change is held until acceptMemberIdentity, which pushes older keys', async () => {
+    const s = new FakeGroupServer();
+    const alice = await member(s, 'alice'); const bob = await member(s, 'bob'); const dan = await member(s, 'dan');
+    s.dm('bob', 'alice'); s.dm('bob', 'dan'); // alice and dan share only the group
+    s.create(G, 'bob', ['alice', 'dan']);
+    await alice.send(G, 'tofu-1');
+    expect((await dan.sync(G)).texts).toEqual(['tofu-1']); // first contact: trusted on first use
+    expect(await alice.groups.getPendingIdentities(G)).toEqual([]);
+    dan.close();
+    const dan2 = await member(s, 'dan', 'DAN2');
+    const rf = await alice.groups.refreshMembers(G); // membership refresh / poll detects the change
+    expect(rf.pending).toEqual([userIdFor('dan')]);
+    expect(rf.identities.map((x) => x.userId)).toEqual([userIdFor('dan')]);
+    expect((await alice.send(G, 'held')).pending).toEqual([userIdFor('dan')]);
+    await dan2.sync(G);
+    await alice.groups.receiveToDevice(s.drainToDevice('alice')); // dan2's key requests: deferred, nothing sent
+    expect(s.toDevice.filter((t) => t.recipient === 'dan')).toEqual([]);
+    const acc = await alice.groups.acceptMemberIdentity(G, userIdFor('dan'));
+    expect(acc.pending).toEqual([]);
+    expect(await alice.groups.getPendingIdentities(G)).toEqual([]);
+    const r = await dan2.sync(G);
+    expect(r.texts).toContain('held');
+    expect(dan2.groups.isWaiting(G)).toBe(false);
+    void bob;
+  });
+
   it('decrypted group messages are saved to the encrypted history store before receive() returns', async () => {
     const { s, m } = await world(['alice', 'bob']);
     s.create(G, 'alice', ['bob']);

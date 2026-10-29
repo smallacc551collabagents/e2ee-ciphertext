@@ -6,7 +6,8 @@
  * check. All cryptography is done by the library; this module only orchestrates rotation, distribution,
  * membership-version handling and key requests.
  */
-import { CryptoError, type CiphertextEnvelope, type CryptoAdapter, type DeviceAddress } from './contract.js';
+import { CryptoError, type CiphertextEnvelope, type CryptoAdapter, type DeviceAddress, type DeviceIdentity } from './contract.js';
+import type { PeerIdentityStore } from './peer-trust.js';
 import { fromB64, toB64, userIdFor, usernameOf, type BackendHttp } from './backend-bridge.js';
 import type { HistoryStore } from './history-store.js';
 
@@ -195,6 +196,8 @@ export interface GroupCryptoOptions {
   maxRetries?: number;
   /** Map the server's senderId (user uuid on the real backend) to a username; default: senderId is the username. */
   senderUsername?: (senderId: string) => string | undefined;
+  /** Same PeerIdentityStore the adapter's identity gate uses. Required for getPendingIdentities / acceptMemberIdentity. */
+  peers?: PeerIdentityStore;
 }
 
 export function createGroupCrypto(o: GroupCryptoOptions) {
@@ -393,6 +396,38 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     deferred.delete(groupId);
   }
 
-  return { send, receive, receiveToDevice, onMembershipChanged, reshare, forget, isWaiting: (g: string) => waiting.has(g) };
+  function needPeers(): PeerIdentityStore {
+    if (!o.peers) throw new CryptoError('INVALID_OPTIONS', 'createGroupCrypto({ peers }) is required for identity hooks');
+    return o.peers;
+  }
+  /** Members of the group whose known identity changed and is not accepted yet (keys are withheld from them). */
+  async function getPendingIdentities(groupId: string): Promise<{ userId: string; previous: DeviceIdentity; current: DeviceIdentity }[]> {
+    const peers = needPeers();
+    const g = await o.backend.getGroup(groupId);
+    const out = [];
+    for (const u of g.members) {
+      if (u === self.userId) continue;
+      const s = await peers.get(u);
+      if (s?.pendingChange) out.push({ userId: u, previous: s.identity, current: s.pendingChange });
+    }
+    return out;
+  }
+  /** Call on membership refresh / poll: re-queries member devices (TOFU for first-seen members, records changes as
+   * pending), shares the current key to trusted members, and returns the pending ones. Never shares to a changed identity. */
+  async function refreshMembers(groupId: string) {
+    const g = await o.backend.getGroup(groupId);
+    const r = await ensureShared(g);
+    return { pending: r.pending, identities: o.peers ? await getPendingIdentities(groupId) : [] };
+  }
+  /** Explicit user accept of a member's new safety number, then push every older key they are entitled to. */
+  async function acceptMemberIdentity(groupId: string, userId: string) {
+    const peers = needPeers();
+    const s = await peers.get(userId);
+    if (!s?.pendingChange) return reshare(groupId, []);
+    await peers.set(userId, { identity: s.pendingChange, checkedAt: Date.now() });
+    return reshare(groupId, [userId]);
+  }
+
+  return { send, receive, receiveToDevice, onMembershipChanged, reshare, forget, getPendingIdentities, refreshMembers, acceptMemberIdentity, isWaiting: (g: string) => waiting.has(g) };
 }
 export type GroupCrypto = ReturnType<typeof createGroupCrypto>;
