@@ -10,6 +10,7 @@ import { CryptoError, type CiphertextEnvelope, type CryptoAdapter, type DeviceAd
 import type { PeerIdentityStore } from './peer-trust.js';
 import { fromB64, toB64, userIdFor, usernameOf, type BackendHttp } from './backend-bridge.js';
 import type { HistoryStore } from './history-store.js';
+import { trackOpen } from './session.js';
 
 /** Groups are enabled (Phase 6 opened). Kept as an export for callers that checked it. */
 export const GROUPS_ENABLED = true as const;
@@ -164,6 +165,7 @@ export async function openGroupStateStore(dbName: string): Promise<GroupStateSto
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
   });
+  const untrackDb = trackOpen(dbName.replace(/-groups$/, ''), () => db.close());
   const tx = <T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest<T>) => new Promise<T>((res, rej) => {
     const q = f(db.transaction('g', mode).objectStore('g'));
     q.onsuccess = () => res(q.result);
@@ -173,7 +175,7 @@ export async function openGroupStateStore(dbName: string): Promise<GroupStateSto
     get: async (k) => (await tx<GroupLocalState | undefined>('readonly', (s) => s.get(k) as IDBRequest<GroupLocalState | undefined>)) ?? undefined,
     set: async (k, v) => void (await tx('readwrite', (s) => s.put(JSON.parse(JSON.stringify(v)) as GroupLocalState, k))),
     delete: async (k) => void (await tx('readwrite', (s) => s.delete(k))),
-    close: () => db.close(),
+    close: () => { untrackDb(); db.close(); },
   };
 }
 
@@ -198,12 +200,18 @@ export interface GroupCryptoOptions {
   senderUsername?: (senderId: string) => string | undefined;
   /** Same PeerIdentityStore the adapter's identity gate uses. Required for getPendingIdentities / acceptMemberIdentity. */
   peers?: PeerIdentityStore;
+  /** Session key for closeCryptoSession(storeName); use the adapter's storeName (e2ee-<userId>). closeCryptoSession() closes all. */
+  storeName?: string;
+  /** Logged-in owner (library user id). Every operation refuses if the adapter belongs to someone else. */
+  ownerUserId?: string;
 }
 
 export function createGroupCrypto(o: GroupCryptoOptions) {
   const a = o.adapter;
   const self = a.identity();
   const store = o.state ?? memoryGroupStateStore();
+  if (o.ownerUserId !== undefined && self.userId !== o.ownerUserId) throw new CryptoError('INVALID_OPTIONS', 'Group crypto owner does not match the adapter identity');
+  let closed = false;
   const requested = new Set<string>(); // `${groupId}|${sessionId}` requested by us
   const waiting = new Set<string>(); // groupIds with messages waiting for a key
   const deferred = new Map<string, { to: DeviceAddress; req: KeyRequest }[]>(); // key requests blocked by the identity gate
@@ -428,6 +436,29 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     return reshare(groupId, [userId]);
   }
 
-  return { send, receive, receiveToDevice, onMembershipChanged, reshare, forget, getPendingIdentities, refreshMembers, acceptMemberIdentity, isWaiting: (g: string) => waiting.has(g) };
+  // Logout: closeCryptoSession() drops in-memory key-request state and makes this instance unusable,
+  // so a later login can never send or answer with the previous user's group state.
+  const untrack = trackOpen(o.storeName ?? `groups:${self.userId}`, () => {
+    closed = true; requested.clear(); waiting.clear(); deferred.clear();
+  });
+  const guard = () => {
+    if (closed) throw new CryptoError('NOT_INITIALIZED', 'Group crypto is closed (logged out)');
+    const now = a.identity().userId;
+    if (now !== self.userId || (o.ownerUserId !== undefined && now !== o.ownerUserId)) throw new CryptoError('INVALID_OPTIONS', 'Group crypto owner mismatch');
+  };
+  const g = <A extends unknown[], R>(f: (...x: A) => Promise<R>) => async (...x: A): Promise<R> => { guard(); return f(...x); };
+  return {
+    send: g(send),
+    receive: g(receive),
+    receiveToDevice: g(receiveToDevice),
+    onMembershipChanged: g(onMembershipChanged),
+    reshare: g(reshare),
+    forget: g(forget),
+    getPendingIdentities: g(getPendingIdentities),
+    refreshMembers: g(refreshMembers),
+    acceptMemberIdentity: g(acceptMemberIdentity),
+    isWaiting: (id: string) => !closed && waiting.has(id),
+    close: () => { if (!closed) { closed = true; requested.clear(); waiting.clear(); deferred.clear(); } untrack(); },
+  };
 }
 export type GroupCrypto = ReturnType<typeof createGroupCrypto>;
