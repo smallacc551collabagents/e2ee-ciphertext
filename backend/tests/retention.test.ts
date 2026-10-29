@@ -99,6 +99,9 @@ test("attachmentRefs: validated (own, stored, this conversation)", async () => {
   assert.equal((await send(alice, other, { attachmentRefs: [ref] })).statusCode, 400, "other conversation");
   assert.equal((await send(alice, conv, { attachmentRefs: ["x"] })).statusCode, 400, "bad ref shape");
   assert.equal((await send(alice, conv, { attachmentRefs: [ref, ref] })).statusCode, 400, "dupes");
+  const pend = (await uploadUrl(alice, blob(80))).json().ref;
+  assert.equal((await send(alice, conv, { attachmentRefs: [pend] })).statusCode, 400, "pending (not completed)");
+  assert.equal((await send(alice, conv, { attachmentRefs: Array.from({ length: 11 }, (_, i) => String.fromCharCode(65 + i).repeat(43)) })).statusCode, 400, "max 10");
   assert.equal((await send(alice, conv, { attachmentRefs: [ref] })).statusCode, 201);
   assert.equal((await send(alice, conv)).statusCode, 201, "attachmentRefs optional");
 });
