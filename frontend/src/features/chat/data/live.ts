@@ -6,7 +6,7 @@ type Crypto = typeof import("@e2ee/crypto");
 import { chatApi } from "./http";
 import { idbKv } from "./idb";
 import type { HistoryStore } from "./history";
-import { browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
+import { AttachmentError, browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
 import { onWipe, storeNameFor, wipeLocalE2EE } from "./wipe";
 import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type MessageView, type SafetyInfo } from "./types";
 import type { ConversationWire, MessageWire } from "@e2ee/shared";
@@ -106,7 +106,7 @@ export function assertMayOpen(state: DeviceState, confirmed: boolean): void {
 
 export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   const serial = keyedSerial();
-  const threads = new Map<string, { after?: string; views: MessageView[]; cache?: Map<string, string> }>();
+  const threads = new Map<string, { entries: Map<string, { seq: bigint; view: MessageView }> }>();
   const peers = idbKv<StoredPeer>(`${storeNameFor(me.id)}-peers`);
   const convos = new Map<string, ConversationWire>();
   const changed = new Map<string, DeviceIdentity>(); // peer userId -> new published identity
@@ -156,7 +156,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     note(await verifier.refreshStale([...convos.values()].map((v) => c.userIdFor(peerOf(v).username))));
   }
 
-  async function sendPlain(conversationId: string, text: string, clientId: string): Promise<MessageView> {
+  async function sendPlain(conversationId: string, text: string, clientId: string, attachmentRefs?: string[]): Promise<MessageView> {
       const { c, adapter, texts } = await init();
       const conv = convos.get(conversationId);
       if (!conv) throw new Error("unknown conversation");
@@ -176,51 +176,61 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
         }
         throw e;
       }
-      const { message } = await chatApi.sendMessage(conversationId, c.encodeMessage(env, clientId));
+      const { message } = await chatApi.sendMessage(conversationId, { ...c.encodeMessage(env, clientId), ...(attachmentRefs?.length ? { attachmentRefs } : {}) })
+        .catch((e: unknown) => {
+          if ((e as { code?: string }).code === "invalid_attachment_refs") throw new AttachmentError("server", "The attachment upload didn’t finish. Please attach the file again.", false);
+          throw e;
+        });
       await texts.put(conversationId, message.seq, { id: message.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text, sentAt: message.createdAt, clientMsgId: clientId }).catch(() => undefined);
-      threads.get(conversationId)?.cache?.set(message.id, text);
-      return { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent" };
+      const view: MessageView = { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent" };
+      threads.get(conversationId)?.entries.set(message.id, { seq: BigInt(message.seq), view });
+      return view;
     }
 
   let display: (t: string) => string = (t) => t;
 
+  /**
+   * The server deletes messages once acked (PR #43), so the thread is rebuilt from the encrypted local
+   * historyStore; the server only supplies not-yet-acked messages, which are decrypted -> persisted -> acked once.
+   * Messages already in local history are never decrypted or acked again. Order is by server seq.
+   */
   async function listMessagesNow(conversationId: string): Promise<MessageView[]> {
-      const { c, adapter, verifier, texts } = await init();
-      const thread = threads.get(conversationId) ?? { views: [] };
-      threads.set(conversationId, thread);
-      const wire = [];
-      let after = thread.after;
-      for (let i = 0; i < 20; i++) {
-        const page = await chatApi.listMessages(conversationId, after);
-        wire.push(...page.messages);
-        if (page.nextCursor) after = page.nextCursor;
-        if (!page.hasMore || !page.nextCursor) break;
-      }
-      const last = wire.at(-1);
-      thread.after = last ? last.seq : after;
-      const out: MessageView[] = [];
-      if (!thread.cache) thread.cache = new Map((await texts.list(conversationId)).map((e) => [e.id, e.text]));
-      const cache = thread.cache;
-      const pending = [];
-      for (const m of wire) {
-        const cached = cache.get(m.id);
-        if (cached !== undefined || m.senderId === me.id) {
-          out.push({ id: m.id, clientId: m.clientMsgId, fromMe: m.senderId === me.id, ...(cached !== undefined ? plaintextView(cached, c.toDisplayText) : { text: "Sent from another session" }), sentAt: m.createdAt, status: "sent" });
-        } else pending.push(m);
-      }
-      if (pending.length) {
-        const results = await processIncoming(pending, {
-          receive: async (m) => (await adapter.receive([c.decodeMessage(m)]))[0]!, display: c.toDisplayText,
-          history: { put: async (cid, seq, msg) => { await texts.put(cid, seq, msg); cache.set(msg.id, msg.text); } }, ack: (ids) => chatApi.ack(ids).then(() => undefined),
-          onView: (v) => out.push(v),
-        });
-        note(await verifier.onReceiveResults(results));
-      }
-      const seen = new Set(thread.views.map((v) => v.id));
-      thread.views = [...thread.views, ...out.filter((v) => !seen.has(v.id))].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
-      return thread.views;
+    const { c, adapter, verifier, texts } = await init();
+    const myUserId = c.userIdFor(me.username);
+    const thread = threads.get(conversationId) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
+    threads.set(conversationId, thread);
+    const add = (seq: string, view: MessageView) => { if (!thread.entries.has(view.id)) thread.entries.set(view.id, { seq: BigInt(seq), view }); };
+    const local = await texts.list(conversationId, undefined, 100_000);
+    const known = new Set(local.map((e) => e.id));
+    for (const e of local) {
+      const fromMe = e.senderUserId === myUserId;
+      add(e.seq, { id: e.id, ...(e.clientMsgId ? { clientId: e.clientMsgId } : {}), fromMe, ...plaintextView(e.text, c.toDisplayText), sentAt: e.sentAt, status: fromMe ? "sent" : "delivered" });
+    }
+    const wire: MessageWire[] = [];
+    let after: string | undefined;
+    for (let i = 0; i < 20; i++) {
+      const page = await chatApi.listMessages(conversationId, after);
+      wire.push(...page.messages);
+      if (!page.hasMore || !page.nextCursor) break;
+      after = page.nextCursor;
+    }
+    const pending: MessageWire[] = [];
+    for (const m of wire) {
+      if (known.has(m.id) || thread.entries.has(m.id)) continue; // already decrypted+persisted: never re-processed
+      if (m.senderId === me.id) add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" });
+      else pending.push(m);
+    }
+    if (pending.length) {
+      const seqOf = new Map(pending.map((m) => [m.id, m.seq]));
+      const results = await processIncoming(pending, {
+        receive: async (m) => (await adapter.receive([c.decodeMessage(m)]))[0]!, display: c.toDisplayText,
+        history: { put: (cid, seq, msg) => texts.put(cid, seq, msg) }, ack: (ids) => chatApi.ack(ids).then(() => undefined),
+        onView: (v) => add(seqOf.get(v.id)!, v),
+      });
+      note(await verifier.onReceiveResults(results));
+    }
+    return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => e.view);
   }
-
 
   return {
     id: "live",
@@ -246,7 +256,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const { c } = await init();
       const bytes = new Uint8Array(await file.arrayBuffer());
       const desc = await sendAtt(conversationId, bytes, { name: safeFileName(file.name), mime: /^[\w.+-]+\/[\w.+-]+$/.test(file.type) ? file.type : "application/octet-stream" }, browserDeps(c), onPhase);
-      return sendPlain(conversationId, encodeAttachmentMessage(desc), clientId);
+      return sendPlain(conversationId, encodeAttachmentMessage(desc), clientId, desc.ref ? [desc.ref] : undefined);
     },
     async openAttachment(descriptor, onPhase) {
       const { c } = await init();

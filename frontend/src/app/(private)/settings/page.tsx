@@ -1,5 +1,6 @@
 import { getSession } from "@/lib/api/server";
 import { LogoutButton } from "@/components/LogoutButton";
+import { DeleteAccount } from "@/components/DeleteAccount";
 import { avatarColor, initials } from "@/features/chat/format";
 
 const NAV = ["Profile", "Privacy", "Devices", "Notifications", "Appearance"] as const;
@@ -54,6 +55,10 @@ export default async function SettingsPage() {
         <section id="appearance" className="rounded-2xl bg-white p-5 ring-1 ring-slate-200"><div className="flex items-center justify-between"><h2 className="font-semibold">Appearance</h2><Soon /></div></section>
         <p className="rounded-2xl bg-blue-50 p-4 text-sm text-blue-800">Verify safety numbers with your contacts to make sure nobody is intercepting your messages.</p>
         <LogoutButton className="rounded-lg bg-red-600 px-4 py-2 text-white hover:bg-red-700" />
+        <section id="danger" aria-labelledby="danger-h" className="rounded-2xl bg-white p-5 ring-1 ring-red-200">
+          <h2 id="danger-h" className="mb-3 font-semibold text-red-700">Delete account</h2>
+          <DeleteAccount />
+        </section>
       </div>
     </main>
   );

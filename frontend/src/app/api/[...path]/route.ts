@@ -1,7 +1,7 @@
 import "server-only";
 import type { NextRequest } from "next/server";
 import { BACKEND_URL, isProduction, proxySecret } from "@/lib/backend";
-import { buildDownstreamHeaders, buildUpstreamHeaders, clientIp, upstreamUrl } from "@/lib/proxy";
+import { buildDownstreamHeaders, buildUpstreamHeaders, clientIp, forwardsBody, upstreamUrl } from "@/lib/proxy";
 
 // First-party proxy (ARCH-013 / E2EE-68): the browser only talks to /api/* on our origin, so the
 // backend's httpOnly e2ee_session cookie is first-party. We inject x-proxy-secret and a trusted
@@ -21,7 +21,7 @@ async function proxy(req: NextRequest, ctx: Ctx): Promise<Response> {
   const target = upstreamUrl(BACKEND_URL, path, req.nextUrl.search);
   const ip = clientIp(req.headers, (req as unknown as { ip?: string }).ip ?? null);
   const headers = buildUpstreamHeaders(req.headers, { secret, ip });
-  const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  const hasBody = forwardsBody(req.method);
 
   let upstream: Response;
   try {
