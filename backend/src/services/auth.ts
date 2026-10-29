@@ -1,3 +1,4 @@
+import { leaveAllGroups } from "./groups.js";
 import { createHash, randomBytes } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import { db, q } from "../database/db.js";
@@ -115,6 +116,8 @@ export async function deleteAccount(c: import("../database/db.js").Queryable, us
     `SELECT m.conversation_id AS id FROM conversation_members m WHERE m.user_id = $1
        AND NOT EXISTS (SELECT 1 FROM conversation_members o WHERE o.conversation_id = m.conversation_id AND o.user_id <> $1)`, [userId]);
   const emptyIds = empty.rows.map((r) => r.id);
+  // Groups with other members: leave them first (admin transfer + system event + version bump).
+  const groupRefs = await leaveAllGroups(c, userId);
   const atts = await c.query<{ ref: string }>(
     `DELETE FROM attachments WHERE owner_user_id = $1 OR conversation_id = ANY($2::uuid[]) RETURNING ref`, [userId, emptyIds]);
   await c.query(`DELETE FROM sessions WHERE user_id = $1`, [userId]);
@@ -125,6 +128,7 @@ export async function deleteAccount(c: import("../database/db.js").Queryable, us
   await c.query(`DELETE FROM messages WHERE sender_id = $1`, [userId]);
   await c.query(`DELETE FROM conversation_members WHERE user_id = $1`, [userId]);
   await c.query(`DELETE FROM conversations WHERE id = ANY($1::uuid[])`, [emptyIds]);
+  await c.query(`DELETE FROM to_device_messages WHERE sender_id = $1 OR recipient_id = $1`, [userId]);
   await c.query(`DELETE FROM users WHERE id = $1`, [userId]);
-  return atts.rows.map((r) => r.ref);
+  return [...groupRefs, ...atts.rows.map((r) => r.ref)];
 }
