@@ -1,7 +1,7 @@
 import { ApiError } from "@/lib/api/client";
 
-/** Mirrors backend USERNAME_RE (^[a-zA-Z0-9_.]{3,32}$). */
-export const USERNAME_PATTERN = /^[a-zA-Z0-9_.]{3,32}$/;
+import { USERNAME_PATTERN } from "@e2ee/shared";
+export { USERNAME_PATTERN };
 
 /** Returns an error message, or null when the username is acceptable. */
 export function validatePeerUsername(raw: string, self: string): string | null {
