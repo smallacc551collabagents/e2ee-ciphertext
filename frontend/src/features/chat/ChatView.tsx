@@ -101,6 +101,16 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
     adapter.listConversations().then((data) => setConvos({ state: "ready", data }), () => undefined);
   }, [adapter]);
 
+  // New 1:1 chats (created by the peer) must show up live: re-fetch the conversation list every 4s and on focus.
+  useEffect(() => {
+    if (device !== "ok" || adapter.id !== "live") return;
+    const tick = () => { if (document.visibilityState === "visible") refreshConvos(); };
+    const t = setInterval(tick, 4000);
+    const off = onSessionEnd(() => clearInterval(t));
+    window.addEventListener("focus", tick);
+    return () => { off(); clearInterval(t); window.removeEventListener("focus", tick); };
+  }, [device, adapter, refreshConvos]);
+
   // No push yet: poll with the after-cursor on focus, reconnect, and every few seconds while visible.
   useEffect(() => {
     if (!activeId || adapter.id !== "live") return;
