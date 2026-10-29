@@ -531,6 +531,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       if (!conv) return { digits: null, changed: false };
       if (conv.kind === "group") {
         // Crypto hook: re-check every member's identity (new device -> pendingChange); only real changes block sending.
+        // On open/poll: re-fetch each member's published identity so a new device is flagged now, not at first send.
+        for (const m of conv.members) if (m.id !== me.id) { try { note([await verifier.refresh(c.userIdFor(m.username))]); } catch { /* offline */ } }
         let ids: { userId: string }[];
         try { const r = await (await gc()).refreshMembers(conversationId); groupPending.set(conversationId, r.pending); ids = r.identities; }
         catch { ids = await (await gc()).getPendingIdentities(conversationId).catch(() => []); }
