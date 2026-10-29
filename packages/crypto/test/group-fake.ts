@@ -111,7 +111,7 @@ export async function member(s: FakeGroupServer, u: string, dev = `${u.toUpperCa
   const prev = s.currentDevice.get(u);
   if (prev && prev !== dev) s.toDevice = s.toDevice.filter((t) => !(t.recipient === u && t.deviceId === prev));
   s.currentDevice.set(u, dev);
-  const groups = createGroupCrypto({ adapter, backend: s.backend(u), ...(opts.state ? { state: opts.state } : {}), ...(opts.rotationMessages ? { rotationMessages: opts.rotationMessages } : {}) });
+  const groups = createGroupCrypto({ adapter, backend: s.backend(u), peers: store, ...(opts.state ? { state: opts.state } : {}), ...(opts.rotationMessages ? { rotationMessages: opts.rotationMessages } : {}) });
   const verifier = createPeerVerifier({ adapter, http, store });
   const cursor = new Map<string, string>();
   return {
