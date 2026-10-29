@@ -17,6 +17,6 @@ export const apiErrorSchema = z.object({ error: z.string(), message: z.string() 
 
 export const credentialsSchema = z.object({
   username: z.string().trim().regex(USERNAME_RE, "At least 3 characters: letters, numbers, _ or ."),
-  password: z.string().min(PASSWORD_MIN, `At least ${PASSWORD_MIN} characters`),
+  password: z.string().min(1, "Enter a password"),
 });
 export type Credentials = z.infer<typeof credentialsSchema>;

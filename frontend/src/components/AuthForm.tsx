@@ -4,7 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { ApiError, signin, signup } from "@/lib/api/client";
 import { safeNext } from "@/lib/safe-next";
-import { credentialsSchema, PASSWORD_MIN } from "@/lib/api/schemas";
+import { credentialsSchema } from "@/lib/api/schemas";
 
 type Mode = "login" | "signup";
 type FieldErrors = Partial<Record<"username" | "password", string>>;
@@ -60,7 +60,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
           </div>
           <div>
             <label htmlFor={`${id}-p`} className="block text-sm font-medium">Password</label>
-            <input id={`${id}-p`} name="password" type="password" required minLength={PASSWORD_MIN}
+            <input id={`${id}-p`} name="password" type="password" required
               autoComplete={isSignup ? "new-password" : "current-password"}
               aria-invalid={Boolean(fieldErrors.password)} aria-describedby={fieldErrors.password ? `${id}-pe` : undefined}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" />
