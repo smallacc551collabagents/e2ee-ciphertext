@@ -1,3 +1,4 @@
+import { assertSameAccount } from "@/lib/session-guard";
 // Live adapter: Phase 1 backend (#13/#19) + packages/crypto (#16/#20). The frontend does
 // no key mapping: it only calls the crypto package's adapter/bridge and the HTTP API.
 // WASM loads client-side via dynamic import; keys live in IndexedDB (crypto package).
@@ -32,6 +33,7 @@ export function ackPrefix(results: readonly { id: string; ok: boolean }[]): stri
 
 const http: BackendHttp = {
   async request(method, path, body) {
+    assertSameAccount();
     const res = await fetch(`/api${path}`, {
       method, credentials: "same-origin", cache: "no-store",
       headers: body === undefined ? {} : { "Content-Type": "application/json" },
@@ -544,7 +546,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
         // On open/poll: re-fetch each member's published identity so a new device is flagged now, not at first send.
         // Throttled per group: safety() also runs after every send, and /keys/identity is rate-limited (429 broke sends).
         // Kept in sessionStorage so a reload doesn't re-burst the rate-limited endpoint.
-        const ck = `e2ee.idCheck.${conversationId}`;
+        const ck = `e2ee.idCheck.${me.id}.${conversationId}`;
         const last = Math.max(identityCheckedAt.get(conversationId) ?? 0, Number(sessionStorage.getItem(ck) ?? 0));
         if (Date.now() - last > 60_000) {
           identityCheckedAt.set(conversationId, Date.now());

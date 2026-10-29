@@ -1,6 +1,7 @@
 "use client";
+import { setActiveUser } from "@/lib/session-guard";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useId, useState, type FormEvent } from "react";
 import { ApiError, signin, signup } from "@/lib/api/client";
 import { safeNext } from "@/lib/safe-next";
@@ -10,7 +11,6 @@ type Mode = "login" | "signup";
 type FieldErrors = Partial<Record<"username" | "password", string>>;
 
 export function AuthForm({ mode }: { mode: Mode }) {
-  const router = useRouter();
   const params = useSearchParams();
   const id = useId();
   const [pending, setPending] = useState(false);
@@ -31,9 +31,9 @@ export function AuthForm({ mode }: { mode: Mode }) {
     setFieldErrors({});
     setPending(true);
     try {
-      await (isSignup ? signup : signin)(parsed.data);
-      router.replace(safeNext(params.get("next")));
-      router.refresh();
+      const user = await (isSignup ? signup : signin)(parsed.data);
+      setActiveUser(user.id); // other open tabs bound to another account reset themselves
+      window.location.replace(safeNext(params.get("next"))); // full load: no state from a previous account
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong.");
       setPending(false);

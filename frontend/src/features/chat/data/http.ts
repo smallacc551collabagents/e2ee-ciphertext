@@ -1,3 +1,4 @@
+import { assertSameAccount } from "@/lib/session-guard";
 import { z } from "zod";
 
 const leaveGroupResponseSchema = z.object({ left: z.boolean(), groupDeleted: z.boolean().optional() });
@@ -7,6 +8,7 @@ import * as w from "@e2ee/shared";
 // Typed client for Backend Phase 1 (PR #13). Not wired into the UI until #13 merges and
 // packages/crypto exposes encrypt/decrypt; see ./index.ts for the single swap point.
 async function call<S extends z.ZodTypeAny>(schema: S, path: string, init?: { method?: string; body?: unknown }): Promise<z.infer<S>> {
+  assertSameAccount();
   let res: Response;
   try {
     res = await fetch(`/api${path}`, {
