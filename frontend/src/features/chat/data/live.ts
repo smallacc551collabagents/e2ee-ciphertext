@@ -8,10 +8,27 @@ import { idbKv } from "./idb";
 import type { HistoryStore } from "./history";
 import { AttachmentError, browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
 import { closeLocalE2EE, onWipe, storeNameFor } from "./wipe";
-import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type MessageView, type SafetyInfo } from "./types";
-import { undeliverableListSchema, type ConversationWire, type MessageWire } from "@e2ee/shared";
+import { systemLine } from "../groupCopy";
+import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type GroupInfo, type MessageView, type SafetyInfo } from "./types";
+import { messageSchema, systemEventSchema, toDeviceListSchema, undeliverableListSchema, type ConversationWire, type MessageWire, type SystemEventWire } from "@e2ee/shared";
 
 export interface Me { id: string; username: string }
+
+/** Local-history marker for server membership events (they carry no ciphertext). */
+export const SYSTEM_PREFIX = "\u0000e2ee.system:";
+/** Group name travels inside the group as an E2EE Megolm message; the server never sees it. */
+export const GROUP_META_TYPE = "org.e2ee.group.meta";
+export function encodeGroupMeta(name: string): string { return JSON.stringify({ t: GROUP_META_TYPE, name: name.slice(0, 64) }); }
+export function decodeGroupMeta(pt: string): { name: string } | null {
+  if (!pt.startsWith("{\"t\":\"" + GROUP_META_TYPE)) return null;
+  try { const o = JSON.parse(pt) as { t?: unknown; name?: unknown }; return o.t === GROUP_META_TYPE && typeof o.name === "string" ? { name: o.name } : null; } catch { return null; }
+}
+/** Acks for one receive batch: everything persisted, in seq order, up to (not including) the first failure. */
+export function ackPrefix(results: readonly { id: string; ok: boolean }[]): string[] {
+  const out: string[] = [];
+  for (const r of results) { if (!r.ok) break; out.push(r.id); }
+  return out;
+}
 
 const http: BackendHttp = {
   async request(method, path, body) {
@@ -110,7 +127,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   const peers = idbKv<StoredPeer>(`${storeNameFor(me.id)}-peers`);
   const convos = new Map<string, ConversationWire>();
   const changed = new Map<string, DeviceIdentity>(); // peer userId -> new published identity
-  let ctx: Promise<{ c: typeof import("@e2ee/crypto"); adapter: CryptoAdapter; verifier: ReturnType<typeof import("@e2ee/crypto").createPeerVerifier>; texts: HistoryStore }> | null = null;
+  let ctx: Promise<{ c: typeof import("@e2ee/crypto"); adapter: CryptoAdapter & import("@e2ee/crypto").GroupPrimitives; verifier: ReturnType<typeof import("@e2ee/crypto").createPeerVerifier>; texts: HistoryStore }> | null = null;
 
   const note = (rs: readonly { userId: string; status: string; current?: DeviceIdentity }[]) => {
     for (const r of rs) if (r.status === "changed" && r.current) changed.set(r.userId, r.current);
@@ -151,17 +168,71 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     return ctx;
   }
 
+  const usernameById = new Map<string, string>();
+  const remember = (v: ConversationWire) => { convos.set(v.id, v); for (const m of v.members) usernameById.set(m.id, m.username); };
+  const nameKey = (gid: string) => `e2ee.groupName.${me.id}.${gid}`;
+  const groupName = (v: ConversationWire) => localStorage.getItem(nameKey(v.id)) || v.members.filter((m) => m.id !== me.id).map((m) => m.username).join(", ") || "Group";
+  const toView = (v: ConversationWire): ConversationView => v.kind === "group"
+    ? { id: v.id, kind: "group", name: groupName(v), preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }
+    : { id: v.id, kind: "direct", name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 };
+  const groupPending = new Map<string, string[]>(); // groupId -> member userIds (crypto ids) whose safety number is unaccepted
+  let gcInst: import("@e2ee/crypto").GroupCrypto | null = null;
+  let gcCtx: unknown = null;
+  async function gc() {
+    const { c, adapter, texts } = await init();
+    if (!gcInst || gcCtx !== ctx) {
+      gcCtx = ctx;
+      gcInst = c.createGroupCrypto({ adapter, backend: c.createHttpGroupBackend(http), history: texts, senderUsername: (id) => usernameById.get(id) });
+    }
+    return gcInst;
+  }
+  async function refreshConvos() {
+    const { conversations } = await chatApi.listConversations();
+    const seen = new Set(conversations.map((v) => v.id));
+    for (const id of [...convos.keys()]) if (!seen.has(id)) convos.delete(id);
+    conversations.forEach(remember);
+    return conversations;
+  }
+  /** Pull Olm to-device envelopes (Megolm room keys, key requests/responses), process, then ack. Returns groups to retry. */
+  const pullToDevice = () => serial("\u0000to-device", async () => {
+    const { c } = await init();
+    const g = await gc();
+    const retry = new Set<string>();
+    for (let i = 0; i < 10; i++) {
+      const page = toDeviceListSchema.parse(await http.request("GET", "/to-device?limit=100"));
+      if (!page.messages.length) break;
+      const envs = [];
+      for (const m of page.messages) { try { envs.push(c.decodeToDevice(m)); } catch { /* malformed: drop */ } }
+      const r = await g.receiveToDevice(envs);
+      r.retry.forEach((x) => retry.add(x));
+      await http.request("POST", "/to-device/ack", { ids: page.messages.map((m) => m.id) });
+      if (!page.hasMore) break;
+    }
+    return retry;
+  });
+  async function sendGroupMeta(gid: string, name: string) {
+    const { c, texts } = await init();
+    const pt = encodeGroupMeta(name);
+    const clientId = crypto.randomUUID();
+    const r = await (await gc()).send(gid, pt, clientId);
+    const m = messageSchema.safeParse((r.message as { message?: unknown })?.message);
+    if (m.success) await texts.put(gid, m.data.seq, { id: m.data.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text: pt, sentAt: m.data.createdAt, clientMsgId: clientId }).catch(() => undefined);
+    groupPending.set(gid, r.pending);
+  }
+  const groupInfoOf = (v: ConversationWire): GroupInfo => ({ id: v.id, name: groupName(v), adminId: v.adminId ?? null, members: v.members.map((m) => ({ id: m.id, username: m.username })), membershipVersion: v.membershipVersion ?? 0 });
+
   const peerOf = (conv: ConversationWire) => conv.members.find((m) => m.id !== me.id) ?? conv.members[0]!;
 
   async function refreshStale() {
     const { c, verifier } = await init();
-    note(await verifier.refreshStale([...convos.values()].map((v) => c.userIdFor(peerOf(v).username))));
+    note(await verifier.refreshStale([...convos.values()].filter((v) => v.kind !== "group").map((v) => c.userIdFor(peerOf(v).username))));
   }
 
   async function sendPlain(conversationId: string, text: string, clientId: string, attachmentRefs?: string[]): Promise<MessageView> {
       const { c, adapter, texts } = await init();
       const conv = convos.get(conversationId);
       if (!conv) throw new Error("unknown conversation");
+      if (conv.kind === "group") return sendGroup(conversationId, text, clientId);
       const peerId = c.userIdFor(peerOf(conv).username);
       if (changed.has(peerId) || (await peers.get(peerId))?.pendingChange) throw new IdentityChangedError(peerId);
       let devs = await adapter.peerIdentities(peerId);
@@ -194,6 +265,85 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
 
   let display: (t: string) => string = (t) => t;
 
+  async function sendGroup(gid: string, text: string, clientId: string): Promise<MessageView> {
+    const { c, texts } = await init();
+    let r;
+    try { r = await (await gc()).send(gid, text, clientId); } catch (e) {
+      if ((e as { status?: number }).status === 404 || (e as { status?: number }).status === 403) { convos.delete(gid); }
+      throw e;
+    }
+    groupPending.set(gid, r.pending);
+    const message = messageSchema.parse((r.message as { message?: unknown })?.message);
+    await texts.put(gid, message.seq, { id: message.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text, sentAt: message.createdAt, clientMsgId: clientId }).catch(() => undefined);
+    const view: MessageView = { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent" };
+    threads.get(gid)?.entries.set(message.id, { seq: BigInt(message.seq), view });
+    return view;
+  }
+
+  async function listGroupMessagesNow(gid: string): Promise<MessageView[]> {
+    const { c, texts } = await init();
+    const g = await gc();
+    const myUserId = c.userIdFor(me.username);
+    const thread = threads.get(gid) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
+    threads.set(gid, thread);
+    const add = (seq: string, view: MessageView) => { if (!thread.entries.has(view.id) || thread.entries.get(view.id)!.view.status === "failed") thread.entries.set(view.id, { seq: BigInt(seq), view }); };
+    const nameOf = (cryptoUserId: string) => { for (const u of usernameById.values()) if (c.userIdFor(u) === cryptoUserId) return u; return undefined; };
+    const fromText = (id: string, seq: string, senderUserId: string, text: string, sentAt: string, clientMsgId?: string) => {
+      if (text.startsWith(SYSTEM_PREFIX)) {
+        const ev = systemEventSchema.safeParse(JSON.parse(text.slice(SYSTEM_PREFIX.length)) as unknown);
+        if (ev.success) add(seq, { id, fromMe: false, system: true, text: systemLine(ev.data, me.id), sentAt, status: "delivered" });
+        return;
+      }
+      const meta = decodeGroupMeta(text);
+      if (meta) { localStorage.setItem(nameKey(gid), meta.name); return; }
+      const fromMe = senderUserId === myUserId;
+      add(seq, { id, ...(clientMsgId ? { clientId: clientMsgId } : {}), fromMe, ...plaintextView(text, c.toDisplayText), sentAt, status: fromMe ? "sent" : "delivered", ...(fromMe ? {} : { senderName: nameOf(senderUserId) }) });
+    };
+    for (const e of await texts.list(gid, undefined, 100_000)) fromText(e.id, e.seq, e.senderUserId, e.text, e.sentAt, e.clientMsgId);
+    await pullToDevice().catch(() => undefined);
+    const wire: MessageWire[] = [];
+    let after: string | undefined;
+    for (let i = 0; i < 20; i++) {
+      const page = await chatApi.listMessages(gid, after);
+      wire.push(...page.messages);
+      if (!page.hasMore || !page.nextCursor) break;
+      after = page.nextCursor;
+    }
+    const known = new Set([...thread.entries.entries()].filter(([, e]) => e.view.status !== "failed").map(([id]) => id));
+    const pending: MessageWire[] = [];
+    for (const m of wire) {
+      if (known.has(m.id)) continue;
+      if (m.kind !== "system" && m.senderId === me.id) { add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" }); continue; }
+      pending.push(m);
+    }
+    if (pending.length) {
+      const results = await g.receive(gid, pending as unknown as import("@e2ee/crypto").GroupMessageDto[]);
+      const acks: { id: string; ok: boolean }[] = [];
+      for (const r of results) {
+        const m = r.dto as unknown as MessageWire;
+        if (r.kind === "member_event") {
+          const ev: SystemEventWire | undefined = m.event;
+          if (ev) {
+            const text = SYSTEM_PREFIX + JSON.stringify(ev);
+            let ok = true;
+            await texts.put(gid, m.seq, { id: m.id, senderUserId: "system", senderDeviceId: "system", text, sentAt: m.createdAt }).catch(() => { ok = false; });
+            fromText(m.id, m.seq, "system", text, m.createdAt);
+            acks.push({ id: m.id, ok });
+          } else acks.push({ id: m.id, ok: true });
+        } else if (r.ok) {
+          fromText(m.id, m.seq, r.sender.userId, r.plaintext, m.createdAt, m.clientMsgId);
+          acks.push({ id: m.id, ok: true });
+        } else {
+          add(m.seq, { id: m.id, fromMe: false, text: r.code === "MISSING_ROOM_KEY" ? "Waiting for this message’s key from the sender…" : "Unable to decrypt this message", sentAt: m.createdAt, status: "failed", senderName: usernameById.get(m.senderId) });
+          acks.push({ id: m.id, ok: false });
+        }
+      }
+      const ids = ackPrefix(acks);
+      if (ids.length) await chatApi.ack(ids).catch(() => undefined);
+    }
+    return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => e.view);
+  }
+
   /**
    * The server deletes messages once acked (PR #43), so the thread is rebuilt from the encrypted local
    * historyStore; the server only supplies not-yet-acked messages, which are decrypted -> persisted -> acked once.
@@ -214,6 +364,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   }
 
   async function listMessagesNow(conversationId: string): Promise<MessageView[]> {
+    if (!convos.has(conversationId)) await refreshConvos().catch(() => undefined);
+    if (convos.get(conversationId)?.kind === "group") return listGroupMessagesNow(conversationId);
     const { c, adapter, verifier, texts } = await init();
     const myUserId = c.userIdFor(me.username);
     const thread = threads.get(conversationId) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
@@ -262,18 +414,57 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     id: "live",
     async listConversations(): Promise<ConversationView[]> {
       await init();
-      const { conversations } = await chatApi.listConversations();
-      conversations.forEach((v) => convos.set(v.id, v));
+      const conversations = await refreshConvos();
       void refreshStale().catch(() => undefined);
-      return conversations.map((v) => ({ id: v.id, name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }));
+      void pullToDevice().catch(() => undefined);
+      return conversations.map(toView);
     },
     listMessages(conversationId) {
       return serial(conversationId, () => listMessagesNow(conversationId));
     },
     async createConversation(username) {
       const { conversation: v } = await chatApi.createConversation(username.trim().replace(/^@/, ""));
-      convos.set(v.id, v);
-      return { id: v.id, name: peerOf(v).username, preview: "", lastActivityAt: v.createdAt ?? new Date().toISOString(), unread: 0 };
+      remember(v);
+      return { ...toView(v), preview: "", lastActivityAt: v.createdAt ?? new Date().toISOString() };
+    },
+    async createGroup(name, usernames) {
+      await init();
+      const { conversation: v } = await chatApi.createGroup(usernames.map((u) => u.trim().replace(/^@/, "")));
+      remember(v);
+      localStorage.setItem(nameKey(v.id), name.trim().slice(0, 64));
+      await sendGroupMeta(v.id, name.trim()).catch(() => undefined); // shares the first Megolm key too
+      return { ...toView(v), preview: "", lastActivityAt: v.createdAt ?? new Date().toISOString() };
+    },
+    async groupInfo(gid) {
+      await refreshConvos();
+      const v = convos.get(gid);
+      if (!v || v.kind !== "group") throw Object.assign(new Error("not a member"), { code: "not_member" });
+      return groupInfoOf(v);
+    },
+    async addGroupMembers(gid, usernames) {
+      const { conversation: v } = await chatApi.addGroupMembers(gid, usernames);
+      remember(v);
+      const g = await gc();
+      await g.onMembershipChanged(gid);
+      // Rotate now and tell new members the (encrypted) group name.
+      await sendGroupMeta(gid, groupName(v)).catch(() => undefined);
+      return groupInfoOf(v);
+    },
+    async removeGroupMember(gid, username) {
+      const { conversation: v } = await chatApi.removeGroupMember(gid, username);
+      remember(v);
+      await (await gc()).onMembershipChanged(gid); // next send rotates: removed member can't read new messages
+    },
+    async leaveGroup(gid) {
+      await chatApi.leaveGroup(gid);
+      await (await gc()).forget(gid).catch(() => undefined);
+      convos.delete(gid);
+      threads.delete(gid);
+      localStorage.removeItem(nameKey(gid));
+    },
+    async contacts() {
+      await refreshConvos();
+      return [...convos.values()].filter((v) => v.kind !== "group").map((v) => peerOf(v).username).filter((u) => u !== me.username);
     },
     async sendMessage(conversationId, text, clientId) {
       return sendPlain(conversationId, text, clientId);
@@ -294,6 +485,14 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const { c, adapter, verifier } = await init();
       const conv = convos.get(conversationId);
       if (!conv) return { digits: null, changed: false };
+      if (conv.kind === "group") {
+        const others = conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username));
+        try { note(await verifier.refreshStale(others)); } catch { /* offline */ }
+        const pend = new Set(groupPending.get(conversationId) ?? []);
+        for (const p of others) if (changed.has(p) || (await peers.get(p))?.pendingChange) pend.add(p);
+        if (!pend.size) return { digits: null, changed: false };
+        return { digits: null, changed: true, changeKind: await changeKind([...pend][0]!) };
+      }
       const peerId = c.userIdFor(peerOf(conv).username);
       // Re-check the peer's published identity on open, so a device change shows the banner before the first send fails.
       try { note([await verifier.refresh(peerId)]); } catch { /* offline: fall back to the cached state */ }
@@ -306,6 +505,17 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const { c, verifier } = await init();
       const conv = convos.get(conversationId);
       if (!conv) return;
+      if (conv.kind === "group") {
+        for (const m of conv.members) {
+          if (m.id === me.id) continue;
+          const pid = c.userIdFor(m.username);
+          const nid = changed.get(pid) ?? (await peers.get(pid))?.pendingChange;
+          if (nid) { await verifier.acceptNewIdentity(nid); changed.delete(pid); }
+        }
+        const r = await (await gc()).reshare(conversationId).catch(() => null);
+        groupPending.set(conversationId, r?.pending ?? []);
+        return;
+      }
       const peerId = c.userIdFor(peerOf(conv).username);
       const id = changed.get(peerId) ?? (await peers.get(peerId))?.pendingChange;
       if (id) { await verifier.acceptNewIdentity(id); changed.delete(peerId); }

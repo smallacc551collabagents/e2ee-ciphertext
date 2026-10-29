@@ -7,7 +7,12 @@ export interface ConversationView {
   preview: string;
   lastActivityAt: string; // ISO
   unread: number;
+  /** Absent = "direct". */
+  kind?: "direct" | "group";
 }
+
+export interface GroupMember { id: string; username: string }
+export interface GroupInfo { id: string; name: string; adminId: string | null; members: GroupMember[]; membershipVersion: number }
 
 export interface MessageView {
   id: string;
@@ -20,6 +25,10 @@ export interface MessageView {
   attachment?: unknown;
   /** Own message the server could not deliver: the recipient replaced its device. Re-sent automatically after acceptNewIdentity. */
   undeliverable?: "recipient-changed-device";
+  /** Group membership line ("alice added bob"). Rendered centred, never as a bubble. */
+  system?: boolean;
+  /** Group messages from others: sender's username. */
+  senderName?: string;
 }
 
 /** Thrown by adapters whose backend/crypto contract isn't available yet. */
@@ -74,4 +83,12 @@ export interface ChatAdapter {
   peerChange?(conversationId: string): Promise<PeerIdentityChange | null>;
   /** Start (or reopen) a direct conversation. Existing conversations are returned, not duplicated. */
   createConversation?(username: string): Promise<ConversationView>;
+  /** Groups (E2EE-55). Members must be existing 1:1 peers (server-enforced; UI filters). */
+  createGroup?(name: string, usernames: string[]): Promise<ConversationView>;
+  groupInfo?(conversationId: string): Promise<GroupInfo>;
+  addGroupMembers?(conversationId: string, usernames: string[]): Promise<GroupInfo>;
+  removeGroupMember?(conversationId: string, username: string): Promise<void>;
+  leaveGroup?(conversationId: string): Promise<void>;
+  /** Usernames the user has a 1:1 chat with (candidates for groups). */
+  contacts?(): Promise<string[]>;
 }

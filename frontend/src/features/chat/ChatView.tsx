@@ -5,6 +5,7 @@ import { AttachmentView } from "./attachments/AttachmentView";
 import { AttachmentError, type Phase } from "./attachments/flow";
 import { changeKindLabel, identityWarning, NEW_DEVICE_COPY } from "./identityCopy";
 import { newChatErrorMessage, validatePeerUsername } from "./newChat";
+import { CreateGroupDialog, MembersPanel } from "./GroupPanels";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
 
 const STATUS_LABEL: Record<MessageStatus, string> = {
@@ -43,6 +44,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
     return () => { live = false; };
   }, [adapter]);
   const [showInfo, setShowInfo] = useState(false);
+  const [newGroup, setNewGroup] = useState(false);
   const [convos, setConvos] = useState<Load<ConversationView[]>>({ state: "loading" });
   const [activeId, setActiveId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Load<MessageView[]>>({ state: "loading" });
@@ -89,6 +91,9 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
       .finally(() => { void adapter.safety?.(id).then(setSafety, () => setSafety(null)); });
   }, [adapter]);
   useEffect(() => { setSafety(null); setShowInfo(false); }, [activeId]);
+  const refreshConvos = useCallback(() => {
+    adapter.listConversations().then((data) => setConvos({ state: "ready", data }), () => undefined);
+  }, [adapter]);
 
   // No push yet: poll with the after-cursor on focus, reconnect, and every few seconds while visible.
   useEffect(() => {
@@ -134,6 +139,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
     try {
       const saved = await adapter.sendMessage(activeId, text, clientId);
       patch(clientId, { ...saved, clientId });
+      if (active?.kind === "group" && adapter.safety) void adapter.safety(activeId).then(setSafety, () => undefined);
       setConvos((s) => (s.state === "ready" ? { ...s, data: s.data.map((c) => (c.id === activeId ? { ...c, preview: text, lastActivityAt: saved.sentAt } : c)) } : s));
     } catch (e) {
       patch(clientId, { status: "failed" });
@@ -208,12 +214,19 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
           </form>
         </div>
       )}
+      {newGroup && (
+        <CreateGroupDialog adapter={adapter} onClose={() => setNewGroup(false)}
+          onCreated={(conv) => { setConvos((s) => (s.state === "ready" ? { ...s, data: [conv, ...s.data.filter((c) => c.id !== conv.id)] } : { state: "ready", data: [conv] })); setNewGroup(false); setActiveId(conv.id); }} />
+      )}
       <aside aria-label="Conversations" className={`${active ? "hidden md:flex" : "flex"} w-full shrink-0 flex-col border-r border-slate-200 bg-white md:w-[360px]`}>
         <div className="flex items-center justify-between px-4 pb-3 pt-5">
           <h2 className="text-2xl font-bold">Chats</h2>
           <button ref={newChatBtn} type="button" title="New chat" aria-label="New chat" aria-haspopup="dialog" disabled={!adapter.createConversation}
             onClick={() => setNewChat({ value: "" })}
             className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-lg text-blue-700 disabled:opacity-50">+</button>
+          {adapter.createGroup && (
+            <button type="button" aria-haspopup="dialog" onClick={() => setNewGroup(true)} className="ml-2 rounded-lg bg-blue-50 px-2 py-1 text-sm text-blue-700">New group</button>
+          )}
         </div>
         <div className="px-2 pb-3">
           <label htmlFor="chat-search" className="sr-only">Search conversations</label>
@@ -249,7 +262,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                     <Avatar name={c.name} />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline justify-between gap-2">
-                        <span className="truncate text-sm font-semibold">{c.name}</span>
+                        <span className="truncate text-sm font-semibold">{c.name}{c.kind === "group" && <span className="ml-1 text-[11px] font-normal text-slate-400" data-testid="group-tag">Group</span>}</span>
                         <span className={`shrink-0 text-xs ${c.unread ? "text-blue-600" : "text-slate-400"}`}>{listTime(c.lastActivityAt)}</span>
                       </span>
                       <span className="mt-0.5 flex items-center justify-between gap-2">
@@ -282,18 +295,23 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                   <LockBadge />
                 </div>
               </div>
-              <button type="button" disabled={!adapter.safety} onClick={() => setShowInfo((v) => !v)} aria-expanded={showInfo} aria-label="Conversation info" className="h-9 w-9 rounded-full text-xl text-slate-500 disabled:opacity-50">ⓘ</button>
+              <button type="button" disabled={active.kind === "group" ? !adapter.groupInfo : !adapter.safety} onClick={() => setShowInfo((v) => !v)} aria-expanded={showInfo} aria-label={active.kind === "group" ? "Group members" : "Conversation info"} className="h-9 w-9 rounded-full text-xl text-slate-500 disabled:opacity-50">ⓘ</button>
             </header>
             {safety?.changed && (
               <div role="alert" data-testid="identity-changed" className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
-                <span data-kind={safety.changeKind ?? "unknown"}>{identityWarning(active.name, safety.changeKind)}</span>
+                <span data-kind={safety.changeKind ?? "unknown"}>{active.kind === "group" ? "A member’s safety number changed. They won’t get keys for new messages until you verify it." : identityWarning(active.name, safety.changeKind)}</span>
                 <span className="flex gap-2">
                   <button type="button" onClick={() => setShowInfo(true)} className="underline">View safety number</button>
                   <button type="button" onClick={() => void acceptIdentity()} className="rounded-full bg-amber-600 px-3 py-1 text-white">I’ve verified it</button>
                 </span>
               </div>
             )}
-            {showInfo && (
+            {showInfo && active.kind === "group" && (
+              <MembersPanel adapter={adapter} conversationId={active.id} meId={userId}
+                onLeft={() => { setConvos((s) => (s.state === "ready" ? { ...s, data: s.data.filter((c) => c.id !== active.id) } : s)); setActiveId(null); }}
+                onChanged={() => { refreshConvos(); loadMsgs(active.id); }} />
+            )}
+            {showInfo && active.kind !== "group" && (
               <aside aria-label="Conversation info" data-testid="safety-number" className="border-b border-slate-200 bg-white px-4 py-3 text-sm">
                 <p className="font-medium">Safety number</p>
                 {safety?.changed && changeKindLabel(safety.changeKind) && <p data-testid="change-kind" className="mt-1 text-amber-800">Change: {changeKindLabel(safety.changeKind)}. Sending is blocked until you verify.</p>}
@@ -322,8 +340,10 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                     return (
                       <li key={m.clientId ?? m.id}>
                         {showDay && <p className="mb-3 text-center"><span className="rounded-full bg-slate-200 px-2.5 py-0.5 text-[11px] text-slate-600">{day}</span></p>}
+                        {m.system ? <p data-testid="system-line" className="text-center text-xs text-slate-500">{m.text}</p> : (
                         <div className={`flex ${m.fromMe ? "justify-end" : "justify-start"}`}>
                           <div data-testid="bubble" className={`max-w-[75%] rounded-2xl px-3 py-2 md:max-w-md ${m.fromMe ? "bg-blue-600 text-white" : "bg-white ring-1 ring-slate-200"}`}>
+                            {!m.fromMe && m.senderName && <p data-testid="sender" className="text-[11px] font-semibold text-slate-500">@{m.senderName}</p>}
                             {/* Plain text only: React escapes; never dangerouslySetInnerHTML. */}
                             {m.attachment !== undefined && adapter.openAttachment
                               ? <AttachmentView descriptor={m.attachment} open={adapter.openAttachment} display={adapter.displayText ?? ((t) => t)} />
@@ -337,6 +357,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                             </p>
                           </div>
                         </div>
+                        )}
                       </li>
                     );
                   })}
@@ -362,7 +383,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
               </div>
             )}
             <form onSubmit={onSend} className="flex gap-2 border-t border-slate-200 bg-white px-4 py-3">
-              {adapter.sendAttachment && (
+              {adapter.sendAttachment && active.kind !== "group" && (
                 <>
                   <input ref={fileInput} type="file" className="sr-only" id="attach-file" tabIndex={-1} aria-hidden
                     onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void sendFile(f); }} />
