@@ -152,7 +152,7 @@ export async function openHistoryStore(storeName: string): Promise<HistoryStore>
  * key, and message history). Close adapters/stores first; open connections block deletion.
  */
 export async function deleteLocalCryptoState(storeName: string): Promise<void> {
-  const names = [`${storeName}::matrix-sdk-crypto`, `${storeName}::matrix-sdk-crypto-meta`, `${storeName}-wrap`, historyDbName(storeName)];
+  const names = [`${storeName}::matrix-sdk-crypto`, `${storeName}::matrix-sdk-crypto-meta`, `${storeName}-wrap`, historyDbName(storeName), `${storeName}-groups`];
   await Promise.all(names.map((n) => new Promise<void>((res, rej) => {
     const r = idb().deleteDatabase(n);
     r.onsuccess = () => res();

@@ -154,6 +154,28 @@ export function memoryGroupStateStore(): GroupStateStore {
   return { get: async (k) => m.get(k), set: async (k, v) => void m.set(k, v), delete: async (k) => void m.delete(k) };
 }
 
+/** Persistent GroupStateStore (IndexedDB). Without it a reload forgets who was entitled to which session, so
+ * every key request (e.g. from a member's new device) is refused. Holds public metadata only. */
+export async function openGroupStateStore(dbName: string): Promise<GroupStateStore & { close(): void }> {
+  const db = await new Promise<IDBDatabase>((res, rej) => {
+    const r = indexedDB.open(dbName, 1);
+    r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains('g')) r.result.createObjectStore('g'); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  const tx = <T>(mode: IDBTransactionMode, f: (s: IDBObjectStore) => IDBRequest<T>) => new Promise<T>((res, rej) => {
+    const q = f(db.transaction('g', mode).objectStore('g'));
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  });
+  return {
+    get: async (k) => (await tx<GroupLocalState | undefined>('readonly', (s) => s.get(k) as IDBRequest<GroupLocalState | undefined>)) ?? undefined,
+    set: async (k, v) => void (await tx('readwrite', (s) => s.put(JSON.parse(JSON.stringify(v)) as GroupLocalState, k))),
+    delete: async (k) => void (await tx('readwrite', (s) => s.delete(k))),
+    close: () => db.close(),
+  };
+}
+
 export type GroupReceiveResult =
   | { kind: 'message'; ok: true; dto: GroupMessageDto; sender: DeviceAddress; plaintext: string }
   | { kind: 'message'; ok: false; dto: GroupMessageDto; code: 'MISSING_ROOM_KEY' | 'DECRYPT_FAILED' | 'IDENTITY_CHANGED' | 'INVALID_ENVELOPE' }
@@ -184,7 +206,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   const deferred = new Map<string, { to: DeviceAddress; req: KeyRequest }[]>(); // key requests blocked by the identity gate
   const load = async (g: string): Promise<GroupLocalState> => (await store.get(g)) ?? { sessionMembers: {} };
 
-  async function ensureShared(g: GroupInfo): Promise<{ pending: string[]; st: GroupLocalState }> {
+  async function ensureShared(g: GroupInfo): Promise<{ pending: string[]; st: GroupLocalState; recipients: DeviceAddress[] }> {
     if (!g.members.includes(self.userId)) throw new CryptoError('INVALID_OPTIONS', 'Not a member of this group');
     if (g.members.length > GROUP_MAX_MEMBERS) throw new CryptoError('INVALID_OPTIONS', 'Group exceeds member cap');
     const st = await load(g.id);
@@ -203,7 +225,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     }
     st.sharedVersion = g.membershipVersion;
     await store.set(g.id, st);
-    return { pending: share.pending, st };
+    return { pending: share.pending, st, recipients: share.envelopes.map((e) => e.recipient) };
   }
 
   async function send(groupId: string, plaintext: string, clientMsgId: string = randomId()) {
@@ -304,6 +326,10 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     }
   }
 
+  async function isMember(groupId: string, userId: string) {
+    try { return ((g) => g.members.includes(userId) && g.members.includes(self.userId))(await o.backend.getGroup(groupId)); } catch { return false; }
+  }
+
   async function receiveToDevice(envelopes: readonly CiphertextEnvelope[]) {
     const res = await a.receiveToDevice(envelopes);
     let roomKeys = 0;
@@ -316,7 +342,10 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
       try { m = JSON.parse(r.plaintext) as KeyRequest | KeyResponse; } catch { continue; }
       if (m.t === 'org.e2ee.group.key_request' && typeof m.groupId === 'string' && typeof m.sessionId === 'string') {
         answered.push({ to: r.envelope.sender, groupId: m.groupId, status: await answer(r.envelope.sender, m) });
-      } else if (m.t === 'org.e2ee.group.key_response' && requested.has(`${m.groupId}|${m.sessionId}`) && typeof m.keys === 'string') {
+      } else if (m.t === 'org.e2ee.group.key_response' && typeof m.keys === 'string' && typeof m.groupId === 'string' && typeof m.sessionId === 'string'
+        && (requested.has(`${m.groupId}|${m.sessionId}`) || (waiting.has(m.groupId) && await isMember(m.groupId, r.envelope.sender.userId)))) {
+        // Unsolicited responses are accepted only while we're waiting on that group and only from a current member
+        // (pushed by reshare() after the sender accepted our new device; our own request may have been lost).
         if (await a.importGroupSession(m.groupId, m.sessionId, r.senderCurve25519, m.keys)) {
           requested.delete(`${m.groupId}|${m.sessionId}`);
           imported.add(m.groupId);
@@ -333,14 +362,25 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   }
 
   /** After the user accepts a changed safety number: rotate+share on next send and answer deferred key requests. */
-  async function reshare(groupId: string) {
+  async function reshare(groupId: string, acceptedUserIds: readonly string[] = []) {
     await onMembershipChanged(groupId);
     const g = await o.backend.getGroup(groupId);
     const r = await ensureShared(g);
     const l = deferred.get(groupId) ?? [];
     deferred.delete(groupId);
     const statuses = [];
-    for (const d of l) statuses.push(await answer(d.to, d.req));
+    const done = new Set<string>();
+    for (const d of l) { done.add(`${d.to.userId}|${d.to.deviceId}|${d.req.sessionId}`); statuses.push(await answer(d.to, d.req)); }
+    // Deferred requests live in memory and are lost on reload, so also push every older session the newly
+    // accepted member was entitled to (answer() re-checks entitlement + current membership) to their current device.
+    const accepted = new Set(acceptedUserIds);
+    for (const to of r.recipients) {
+      if (!accepted.has(to.userId)) continue;
+      for (const [sessionId, mem] of Object.entries(r.st.sessionMembers)) {
+        if (!mem.includes(to.userId) || done.has(`${to.userId}|${to.deviceId}|${sessionId}`)) continue;
+        statuses.push(await answer(to, { t: 'org.e2ee.group.key_request', groupId, sessionId }));
+      }
+    }
     // Re-request keys we are still waiting for (e.g. our own device was replaced and earlier requests were dropped).
     for (const k of [...requested]) if (k.startsWith(`${groupId}|`)) requested.delete(k);
     return { pending: r.pending, answered: statuses };

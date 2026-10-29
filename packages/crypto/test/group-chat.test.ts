@@ -2,7 +2,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { FakeGroupServer, member } from './group-fake.js';
-import { decodeGroupEnvelope, GROUPS_ENABLED, openHistoryStore, userIdFor, createGroupCrypto } from '../src/index.js';
+import { decodeGroupEnvelope, GROUPS_ENABLED, openHistoryStore, userIdFor, createGroupCrypto, openGroupStateStore } from '../src/index.js';
 
 const G = 'grp-1';
 async function world(names = ['alice', 'bob', 'carol']) {
@@ -174,6 +174,32 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
     expect(r3.texts).toEqual(['third']);
     expect(bob2.groups.isWaiting(G)).toBe(false);
     expect((await m.carol!.sync(G)).texts).toEqual(['first', 'second', 'third']);
+  });
+
+  it('new device after sender reload: accept + reshare(accepted) pushes old sessions to the new device (no request needed)', async () => {
+    const s = new FakeGroupServer();
+    const st = await openGroupStateStore(`alice-groups-${Date.now()}`);
+    const alice = await member(s, 'alice', 'ALICE1', { state: st });
+    const bob = await member(s, 'bob'); await member(s, 'carol');
+    for (const a of ['alice', 'bob', 'carol']) for (const b of ['alice', 'bob', 'carol']) if (a !== b) s.dm(a, b);
+    s.create(G, 'alice', ['bob', 'carol']);
+    await alice.send(G, 'first');
+    bob.close();
+    const bob2 = await member(s, 'bob', 'BOB2');
+    // Alice sends while Bob's new identity is unaccepted: Bob is pending, share withheld.
+    expect((await alice.send(G, 'pending-time')).pending).toEqual([userIdFor('bob')]);
+    expect((await bob2.sync(G)).texts).toEqual([]);
+    // Bob2's key requests reach Alice, get deferred in memory... then Alice reloads (memory lost, state store kept).
+    await alice.groups.receiveToDevice(s.drainToDevice('alice'));
+    const alice2 = await member(s, 'alice', 'ALICE1', { storeName: alice.storeName, state: st });
+    const ref = await alice2.verifier.refresh(userIdFor('bob'));
+    await alice2.verifier.acceptNewIdentity(ref.current!);
+    const rs = await alice2.groups.reshare(G, [userIdFor('bob')]);
+    expect(rs.answered.length).toBeGreaterThan(0);
+    expect(rs.answered.every((x) => x === 'sent')).toBe(true);
+    const r = await bob2.sync(G);
+    expect(r.texts).toEqual(['first', 'pending-time']);
+    expect(bob2.groups.isWaiting(G)).toBe(false);
   });
 
   it('decrypted group messages are saved to the encrypted history store before receive() returns', async () => {
