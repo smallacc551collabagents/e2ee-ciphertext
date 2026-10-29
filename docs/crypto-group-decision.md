@@ -1,12 +1,13 @@
 # Group protocol decision (E2EE-53 / P6-1)
 
-Status: **Decision — groups stay DISABLED for the MVP.** Phase 6 is optional and gated (P5-G, opened only by
-web-chat lead + Crypto). Reviewed 2026-10-24; re-check library status before reopening.
+Status: **ENABLED (2026-10-29)** — groups use Megolm via `@matrix-org/matrix-sdk-crypto-wasm` 18.9.0, room keys
+over Olm to each member's current device behind the identity gate. API + server contract:
+`docs/group-api-proposal.md`. (Previously: disabled for the MVP, reviewed 2026-10-24.)
 
 ## Enforcement
-`packages/crypto/src/groups.ts`: `GROUPS_ENABLED = false`; `assertDirectConversation(members, self)` must be
-called before encrypt and throws `INVALID_OPTIONS` for anything other than exactly two members incl. self.
-Backend/Frontend should not offer group creation (follow-up for those owners).
+`packages/crypto/src/groups.ts`: `GROUPS_ENABLED = true`; group messages go through `createGroupCrypto`
+(rotation on membership change / 100 msgs / 7 days, `membershipVersion` + 409 retry, post-join-only key requests).
+`assertDirectConversation(members, self)` is still required on the 1:1 (Olm) path.
 
 ## Options considered
 | Option | Library for the browser | Assurance | Verdict |
