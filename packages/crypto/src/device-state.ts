@@ -8,7 +8,7 @@
  * The old browser's local keys are never touched by this module.
  */
 import { CryptoError, type DeviceIdentity } from './contract.js';
-import type { BackendHttp } from './backend-bridge.js';
+import { fromBundle, userIdFor, type BackendHttp } from './backend-bridge.js';
 
 /** fresh: no server identity yet; existing: this browser holds the keys; needs-new-device-confirmation: server has an identity, this browser has none. */
 export type LocalDeviceState = 'fresh' | 'existing' | 'needs-new-device-confirmation';
@@ -57,9 +57,28 @@ export async function serverHasIdentity(http: BackendHttp, username: string): Pr
 }
 
 /** Decide whether opening the adapter is safe or needs the user's "use this browser as my new device" confirmation. */
-export async function localDeviceState(o: { http: BackendHttp; username: string; storeName: string }): Promise<LocalDeviceState> {
-  if (await hasLocalKeystore(o.storeName)) return 'existing';
+export async function localDeviceState(o: { http: BackendHttp; username: string; storeName: string; deviceId?: string }): Promise<LocalDeviceState> {
+  if (await hasLocalKeystore(o.storeName)) {
+    // Logout keeps the keystore, so this is the normal re-login path. If the caller passes its local
+    // deviceId, also require that the server still publishes THIS device; a keystore left behind after
+    // the account moved to another browser must not silently re-publish over the newer device.
+    if (o.deviceId === undefined) return 'existing';
+    const pub = await serverDeviceId(o.http, o.username);
+    return pub === null || pub === o.deviceId ? 'existing' : 'needs-new-device-confirmation';
+  }
   return (await serverHasIdentity(o.http, o.username)) ? 'needs-new-device-confirmation' : 'fresh';
+}
+
+/** deviceId of the identity the server publishes for `username`, or null if none (404). */
+export async function serverDeviceId(http: BackendHttp, username: string): Promise<string | null> {
+  try {
+    const b = await http.request('GET', `/keys/identity/${encodeURIComponent(username)}`);
+    return fromBundle(b as never, userIdFor(username)).deviceId;
+  } catch (e) {
+    if (e instanceof CryptoError) throw e;
+    if ((e as { status?: number }).status === 404) return null;
+    throw new CryptoError('TRANSPORT_FAILED', 'Could not check the published identity', { cause: e });
+  }
 }
 
 /** How a peer's published identity changed. 'new-device': a different deviceId (peer signed in on a new browser); 'key-changed': same deviceId, different keys (unexpected). */
