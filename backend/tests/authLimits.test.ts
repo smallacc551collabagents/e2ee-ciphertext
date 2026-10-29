@@ -5,7 +5,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PGlite, type Transaction } from "@electric-sql/pglite";
 import type { FastifyInstance } from "fastify";
-import { USERNAME_MAX, PASSWORD_MAX, USERNAME_PATTERN } from "@e2ee/shared";
+import { USERNAME_MAX, PASSWORD_MAX, PASSWORD_MIN, USERNAME_PATTERN } from "@e2ee/shared";
 import { setTestDb, type Queryable } from "../src/database/db.js";
 import { buildApp } from "../src/app.js";
 
@@ -34,6 +34,7 @@ const signup = (username: string, password = "correct-horse-battery") =>
 test("shared constants", () => {
   assert.equal(USERNAME_MAX, 64);
   assert.equal(PASSWORD_MAX, 1024);
+  assert.equal(PASSWORD_MIN, 1);
   assert.ok(USERNAME_PATTERN.test("a".repeat(64)));
   assert.ok(!USERNAME_PATTERN.test("a".repeat(65)));
   assert.ok(!USERNAME_PATTERN.test("ab"));
@@ -46,10 +47,14 @@ test("username boundary 64 ok / 65 rejected", async () => {
   assert.equal((await signup("bad-char!")).statusCode, 400);
 });
 
-test("password boundary 1024 ok / 1025 rejected, min 10", async () => {
+test("password boundary 1024 ok / 1025 rejected, min 1 (empty rejected)", async () => {
   assert.equal((await signup("pw1024", "p".repeat(1024))).statusCode, 201);
   assert.equal((await signup("pw1025", "p".repeat(1025))).statusCode, 400);
-  assert.equal((await signup("pw9", "p".repeat(9))).statusCode, 400);
+  assert.equal((await signup("pw1", "p")).statusCode, 201);
+  assert.equal((await signup("pw0", "")).statusCode, 400);
+  const si = (password: string) => app.inject({ method: "POST", url: "/auth/signin", payload: { username: "pw1", password }, headers: { "x-real-ip": `10.8.${n >> 8}.${n++ & 255}` } });
+  assert.equal((await si("p")).statusCode, 200);
+  assert.equal((await si("")).statusCode, 400);
 });
 
 test("64-char username works for identity lookup and conversation start", async () => {

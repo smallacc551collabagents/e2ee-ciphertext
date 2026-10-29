@@ -10,7 +10,7 @@ const version = z.number().int().min(1).max(65535);
 // Auth limits: single source for backend (routes/auth.ts) and frontend.
 export const USERNAME_MIN = 3;
 export const USERNAME_MAX = 64;
-export const PASSWORD_MIN = 10;
+export const PASSWORD_MIN = 1;
 export const PASSWORD_MAX = 1024; // hard cap: argon2 on unbounded input is a DoS vector
 export const USERNAME_PATTERN_SOURCE = `^[a-zA-Z0-9_.]{${USERNAME_MIN},${USERNAME_MAX}}$`;
 export const USERNAME_PATTERN = new RegExp(USERNAME_PATTERN_SOURCE);
@@ -53,7 +53,7 @@ export const sendMessageRequestSchema = z.object({
   clientMsgId: clientMsgIdSchema, ciphertext: capped(CIPHERTEXT_MAX_BYTES), version,
   attachmentRefs: z.array(attachmentRefSchema).max(ATTACHMENT_REFS_MAX).refine((a) => new Set(a).size === a.length, "unique items").optional(),
 }).strict();
-export const deleteAccountRequestSchema = z.object({ password: z.string().min(1).max(PASSWORD_MAX) }).strict();
+export const deleteAccountRequestSchema = z.object({ password: z.string().min(PASSWORD_MIN).max(PASSWORD_MAX) }).strict();
 export const sendMessageResponseSchema = z.object({ message: messageSchema, duplicate: z.boolean() });
 export const messagePageSchema = z.object({ messages: z.array(messageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean() });
 // Resend-on-new-identity: GET /conversations/:id/undeliverable -> own messages whose recipient published a
