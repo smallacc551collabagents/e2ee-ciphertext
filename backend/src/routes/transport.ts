@@ -4,26 +4,23 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { q, tx, type Queryable } from "../database/db.js";
 import { me, requireAuth } from "../middleware/requireAuth.js";
-import { normalizeUsername, USERNAME_RE } from "../services/auth.js";
+import { normalizeUsername } from "../services/auth.js";
 import { overLimit } from "../utils/rateLimiter.js";
+import { shared } from "../utils/sharedSchema.js";
+import {
+  ackRequestSchema, CIPHERTEXT_MAX_BYTES, conversationParamsSchema, createConversationRequestSchema, KEY_MAX_BYTES,
+  messagePageQuerySchema, publishKeysRequestSchema, sendMessageRequestSchema, usernameParamsSchema,
+} from "@e2ee/shared";
 
 export const LIMITS = {
-  keyBytes: 1024, // any single public key / signature
-  ciphertextBytes: 32 * 1024, // one message envelope
+  keyBytes: KEY_MAX_BYTES, // any single public key / signature
+  ciphertextBytes: CIPHERTEXT_MAX_BYTES, // one message envelope
   prekeyBatch: 100, // one-time prekeys per publish
   prekeyPool: 500, // max unconsumed one-time prekeys per user
   pageSize: 100, // messages per fetch
   ackBatch: 500,
   bundlePerTargetPerMin: 30, // caps one-time-prekey draining of a single victim across all callers
 } as const;
-
-const b64max = (bytes: number) => Math.ceil(bytes / 3) * 4;
-const B64 = "^[A-Za-z0-9+/]+={0,2}$";
-const b64 = (bytes: number) => ({ type: "string", minLength: 4, maxLength: b64max(bytes), pattern: B64 }) as const;
-const version = { type: "integer", minimum: 1, maximum: 65535 } as const;
-const keyId = { type: "integer", minimum: 0, maximum: 2147483647 } as const;
-const uuid = { type: "string", pattern: "^[0-9a-fA-F-]{36}$" } as const;
-const key = b64(LIMITS.keyBytes);
 
 type B64Key = { keyId: number; publicKey: string; version: number };
 interface PublishBody {
@@ -79,16 +76,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   // ---------- keys ----------
   app.post<{ Body: PublishBody }>("/keys/publish", {
     bodyLimit: 256 * 1024,
-    schema: { body: {
-      type: "object", additionalProperties: false, minProperties: 1,
-      properties: {
-        identityKey: { type: "object", additionalProperties: false, required: ["publicKey", "version"], properties: { publicKey: key, version } },
-        signedPrekey: { type: "object", additionalProperties: false, required: ["keyId", "publicKey", "signature", "version"],
-          properties: { keyId, publicKey: key, signature: key, version } },
-        oneTimePrekeys: { type: "array", minItems: 1, maxItems: LIMITS.prekeyBatch,
-          items: { type: "object", additionalProperties: false, required: ["keyId", "publicKey", "version"], properties: { keyId, publicKey: key, version } } },
-      },
-    } },
+    ...shared({ body: publishKeysRequestSchema }),
   }, async (req, reply) => {
     const uid = me(req).id;
     const { identityKey, signedPrekey, oneTimePrekeys } = req.body;
@@ -141,7 +129,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get<{ Params: { username: string } }>("/keys/bundle/:username", {
-    schema: { params: { type: "object", required: ["username"], properties: { username: { type: "string", pattern: USERNAME_RE } } } },
+    ...shared({ params: usernameParamsSchema }),
     config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 60, timeWindow: "1 minute", keyGenerator: (r) => `bundle:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
     const target = normalizeUsername(req.params.username);
@@ -173,7 +161,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   // Read-only lookup: identity + signed prekey only. Consumes NOTHING, so clients may call it
   // on every receive; per-caller limit only (no per-target drain limit — there is nothing to drain).
   app.get<{ Params: { username: string } }>("/keys/identity/:username", {
-    schema: { params: { type: "object", required: ["username"], properties: { username: { type: "string", pattern: USERNAME_RE } } } },
+    ...shared({ params: usernameParamsSchema }),
     config: { rateLimit: { hook: "preHandler", max: 60, timeWindow: "1 minute", keyGenerator: (r) => `identity:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
     const r = await q().query<{ user_id: string; username: string; identity_key: Buffer; identity_key_version: number; signed_prekey_id: number; signed_prekey: Buffer; signed_prekey_signature: Buffer; signed_prekey_version: number }>(
@@ -189,7 +177,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------- conversations ----------
   app.post<{ Body: { username: string } }>("/conversations", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["username"], properties: { username: { type: "string", pattern: USERNAME_RE } } } },
+    ...shared({ body: createConversationRequestSchema }),
   }, async (req, reply) => {
     const self = me(req);
     const peer = await q().query<{ id: string; username: string }>(`SELECT id, username FROM users WHERE username = $1`, [normalizeUsername(req.body.username)]);
@@ -228,11 +216,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
 
   // ---------- messages ----------
   app.post<{ Params: { id: string }; Body: { clientMsgId: string; ciphertext: string; version: number } }>("/conversations/:id/messages", {
-    schema: {
-      params: { type: "object", required: ["id"], properties: { id: uuid } },
-      body: { type: "object", additionalProperties: false, required: ["clientMsgId", "ciphertext", "version"],
-        properties: { clientMsgId: { type: "string", pattern: "^[A-Za-z0-9_-]{8,64}$" }, ciphertext: b64(LIMITS.ciphertextBytes), version } },
-    },
+    ...shared({ params: conversationParamsSchema, body: sendMessageRequestSchema }),
     config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 120, timeWindow: "1 minute", keyGenerator: (r) => `msg:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
     const uid = me(req).id;
@@ -268,10 +252,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get<{ Params: { id: string }; Querystring: { after?: string; limit?: string } }>("/conversations/:id/messages", {
-    schema: {
-      params: { type: "object", required: ["id"], properties: { id: uuid } },
-      querystring: { type: "object", additionalProperties: false, properties: { after: { type: "string", pattern: "^[0-9]{1,18}$" }, limit: { type: "string", pattern: "^[0-9]{1,3}$" } } },
-    },
+    ...shared({ params: conversationParamsSchema, querystring: messagePageQuerySchema }),
   }, async (req, reply) => {
     const uid = me(req).id;
     if (!(await isMember(q(), req.params.id, uid))) return err(reply, 404, "not_found", "Conversation not found.");
@@ -283,8 +264,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post<{ Body: { messageIds: string[] } }>("/messages/ack", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["messageIds"],
-      properties: { messageIds: { type: "array", minItems: 1, maxItems: LIMITS.ackBatch, uniqueItems: true, items: uuid } } } },
+    ...shared({ body: ackRequestSchema }),
   }, async (req) => {
     // Scoped to recipient_id = caller, so acking others' or unknown ids is a silent no-op.
     const r = await q().query(

@@ -5,10 +5,16 @@ import { z } from "zod";
 // belongs to packages/crypto. Never add inner structure here.
 const b64 = z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, "standard base64");
 const version = z.number().int().min(1).max(65535);
+// Request schemas below are the backend's validation source (backend/src/routes/transport.ts):
+// strict objects (unknown keys rejected) and bounds matching the server's limits.
+export const USERNAME_PATTERN = /^[a-zA-Z0-9_.]{3,32}$/;
+const usernameSchema = z.string().regex(USERNAME_PATTERN);
+const keyIdSchema = z.number().int().min(0).max(2147483647);
+const uuidSchema = z.string().regex(/^[0-9a-fA-F-]{36}$/);
 export const KEY_MAX_BYTES = 1024;
 export const CIPHERTEXT_MAX_BYTES = 32 * 1024;
 export const b64Bytes = (s: string) => Math.floor((s.length * 3) / 4) - (s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0);
-const capped = (max: number) => b64.refine((s) => b64Bytes(s) <= max, `≤ ${max} bytes`);
+const capped = (max: number) => b64.min(4).max(Math.ceil(max / 3) * 4).refine((s) => b64Bytes(s) <= max, `≤ ${max} bytes`);
 
 export const memberSchema = z.object({ id: z.string(), username: z.string() });
 export const conversationSchema = z.object({
@@ -19,7 +25,7 @@ export const conversationSchema = z.object({
   members: z.array(memberSchema),
 });
 export const conversationListSchema = z.object({ conversations: z.array(conversationSchema) });
-export const createConversationRequestSchema = z.object({ username: z.string().min(1) });
+export const createConversationRequestSchema = z.object({ username: usernameSchema }).strict();
 export const createConversationResponseSchema = z.object({ conversation: conversationSchema });
 
 export const clientMsgIdSchema = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/);
@@ -33,20 +39,23 @@ export const messageSchema = z.object({
   version,
   createdAt: z.string(),
 });
-export const sendMessageRequestSchema = z.object({ clientMsgId: clientMsgIdSchema, ciphertext: capped(CIPHERTEXT_MAX_BYTES), version });
+export const sendMessageRequestSchema = z.object({ clientMsgId: clientMsgIdSchema, ciphertext: capped(CIPHERTEXT_MAX_BYTES), version }).strict();
 export const sendMessageResponseSchema = z.object({ message: messageSchema, duplicate: z.boolean() });
 export const messagePageSchema = z.object({ messages: z.array(messageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean() });
-export const ackRequestSchema = z.object({ messageIds: z.array(z.string().uuid()).max(500) });
+export const ackRequestSchema = z.object({ messageIds: z.array(uuidSchema).min(1).max(500).refine((a) => new Set(a).size === a.length, "unique items") }).strict();
 export const ackResponseSchema = z.object({ acked: z.number().int().nonnegative() });
 
-const pubKey = z.object({ publicKey: capped(KEY_MAX_BYTES), version });
-const signedPrekey = z.object({ keyId: z.number().int().nonnegative(), publicKey: capped(KEY_MAX_BYTES), signature: capped(KEY_MAX_BYTES), version });
-const oneTimePrekey = z.object({ keyId: z.number().int().nonnegative(), publicKey: capped(KEY_MAX_BYTES), version });
+const pubKey = z.object({ publicKey: capped(KEY_MAX_BYTES), version }).strict();
+const signedPrekey = z.object({ keyId: keyIdSchema, publicKey: capped(KEY_MAX_BYTES), signature: capped(KEY_MAX_BYTES), version }).strict();
+const oneTimePrekey = z.object({ keyId: keyIdSchema, publicKey: capped(KEY_MAX_BYTES), version }).strict();
 export const publishKeysRequestSchema = z.object({
   identityKey: pubKey.optional(),
   signedPrekey: signedPrekey.optional(),
-  oneTimePrekeys: z.array(oneTimePrekey).max(100).optional(),
-});
+  oneTimePrekeys: z.array(oneTimePrekey).min(1).max(100).optional(),
+}).strict().refine((o) => Object.keys(o).length > 0, "at least one of identityKey, signedPrekey, oneTimePrekeys");
+export const usernameParamsSchema = z.object({ username: usernameSchema });
+export const conversationParamsSchema = z.object({ id: uuidSchema });
+export const messagePageQuerySchema = z.object({ after: z.string().regex(/^[0-9]{1,18}$/).optional(), limit: z.string().regex(/^[0-9]{1,3}$/).optional() }).strict();
 export const prekeyCountSchema = z.object({ oneTimePrekeyCount: z.number().int().nonnegative() });
 export const prekeyBundleSchema = z.object({
   userId: z.string(), username: z.string(),
