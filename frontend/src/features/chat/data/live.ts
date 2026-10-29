@@ -137,7 +137,16 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   let confirmedNewDevice = false;
   let state: Promise<DeviceState> | null = null;
   async function deviceState(): Promise<DeviceState> {
-    state ??= import("@e2ee/crypto").then((c) => c.localDeviceState({ http, username: me.username, storeName: storeNameFor(me.id), deviceId: localStorage.getItem(`e2ee.deviceId.${me.id}`) ?? undefined }));
+    // /keys/identity is rate-limited; a 429 here must not fail the whole chat list, so retry a few times.
+    const check = async (c: typeof import("@e2ee/crypto"), tries = 3): Promise<DeviceState> => {
+      try { return await c.localDeviceState({ http, username: me.username, storeName: storeNameFor(me.id), deviceId: localStorage.getItem(`e2ee.deviceId.${me.id}`) ?? undefined }); }
+      catch (e) {
+        if (tries <= 1 || (e as { cause?: { status?: number } }).cause?.status !== 429) throw e;
+        await new Promise((r) => setTimeout(r, 5000));
+        return check(c, tries - 1);
+      }
+    };
+    state ??= import("@e2ee/crypto").then((c) => check(c));
     state.catch(() => { state = null; });
     return state;
   }
