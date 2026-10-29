@@ -86,7 +86,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post<{ Body: { username: string } }>("/forgot-password", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["username"], properties: { username: { type: "string", maxLength: 64 } } } },
+    schema: { body: { type: "object", additionalProperties: false, required: ["username"], properties: { username: { type: "string", maxLength: auth.USERNAME_MAX } } } },
   }, async (req, reply) => {
     // ARCH-012 interim: reset endpoints disabled in production.
     if (isProd()) return reply.code(404).send({ error: "not_found", message: "Not found." });

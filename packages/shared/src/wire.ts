@@ -7,7 +7,13 @@ const b64 = z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-
 const version = z.number().int().min(1).max(65535);
 // Request schemas below are the backend's validation source (backend/src/routes/transport.ts):
 // strict objects (unknown keys rejected) and bounds matching the server's limits.
-export const USERNAME_PATTERN = /^[a-zA-Z0-9_.]{3,32}$/;
+// Auth limits: single source for backend (routes/auth.ts) and frontend.
+export const USERNAME_MIN = 3;
+export const USERNAME_MAX = 64;
+export const PASSWORD_MIN = 10;
+export const PASSWORD_MAX = 1024; // hard cap: argon2 on unbounded input is a DoS vector
+export const USERNAME_PATTERN_SOURCE = `^[a-zA-Z0-9_.]{${USERNAME_MIN},${USERNAME_MAX}}$`;
+export const USERNAME_PATTERN = new RegExp(USERNAME_PATTERN_SOURCE);
 const usernameSchema = z.string().regex(USERNAME_PATTERN);
 const keyIdSchema = z.number().int().min(0).max(2147483647);
 const uuidSchema = z.string().regex(/^[0-9a-fA-F-]{36}$/);
@@ -47,7 +53,7 @@ export const sendMessageRequestSchema = z.object({
   clientMsgId: clientMsgIdSchema, ciphertext: capped(CIPHERTEXT_MAX_BYTES), version,
   attachmentRefs: z.array(attachmentRefSchema).max(ATTACHMENT_REFS_MAX).refine((a) => new Set(a).size === a.length, "unique items").optional(),
 }).strict();
-export const deleteAccountRequestSchema = z.object({ password: z.string().min(1).max(256) }).strict();
+export const deleteAccountRequestSchema = z.object({ password: z.string().min(1).max(PASSWORD_MAX) }).strict();
 export const sendMessageResponseSchema = z.object({ message: messageSchema, duplicate: z.boolean() });
 export const messagePageSchema = z.object({ messages: z.array(messageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean() });
 export const ackRequestSchema = z.object({ messageIds: z.array(uuidSchema).min(1).max(500).refine((a) => new Set(a).size === a.length, "unique items") }).strict();

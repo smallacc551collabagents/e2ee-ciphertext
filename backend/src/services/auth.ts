@@ -7,9 +7,11 @@ const ARGON = { algorithm: 2 /* Algorithm.Argon2id (const enum) */ as const, mem
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 export const RESET_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-export const USERNAME_RE = "^[a-zA-Z0-9_.]{3,32}$";
-export const PASSWORD_MIN = 10;
-export const PASSWORD_MAX = 256;
+import { PASSWORD_MAX as SHARED_PASSWORD_MAX, PASSWORD_MIN as SHARED_PASSWORD_MIN, USERNAME_MAX as SHARED_USERNAME_MAX, USERNAME_PATTERN_SOURCE } from "@e2ee/shared";
+export const USERNAME_RE = USERNAME_PATTERN_SOURCE;
+export const USERNAME_MAX = SHARED_USERNAME_MAX;
+export const PASSWORD_MIN = SHARED_PASSWORD_MIN;
+export const PASSWORD_MAX = SHARED_PASSWORD_MAX;
 
 export const normalizeUsername = (u: string): string => u.trim().toLowerCase();
 export const hashPassword = (p: string): Promise<string> => hash(p, ARGON);
