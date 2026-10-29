@@ -210,7 +210,9 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const { c, adapter, texts } = await init();
     if (!gcInst || gcCtx !== ctx) {
       gcCtx = ctx;
-      gcInst = c.createGroupCrypto({ adapter, backend: c.createHttpGroupBackend(http), history: texts, senderUsername: (id) => usernameById.get(id) });
+      const state = await c.openGroupStateStore(`${storeNameFor(me.id)}-groups`);
+      onWipe(() => state.close());
+      gcInst = c.createGroupCrypto({ adapter, state, backend: c.createHttpGroupBackend(http), history: texts, senderUsername: (id) => usernameById.get(id) });
     }
     return gcInst;
   }
@@ -548,12 +550,13 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const conv = convos.get(conversationId);
       if (!conv) return;
       if (conv.kind === "group") {
+        const acc: string[] = [];
         const ids = new Set([...conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username)), ...(groupPending.get(conversationId) ?? [])]);
         for (const pid of ids) {
           const nid = changed.get(pid) ?? (await peers.get(pid))?.pendingChange;
-          if (nid) { await verifier.acceptNewIdentity(nid); changed.delete(pid); }
+          if (nid) { await verifier.acceptNewIdentity(nid); changed.delete(pid); acc.push(pid); }
         }
-        const r = await (await gc()).reshare(conversationId).catch(() => null);
+        const r = await (await gc()).reshare(conversationId, acc).catch(() => null);
         groupPending.set(conversationId, r?.pending ?? []);
         return;
       }

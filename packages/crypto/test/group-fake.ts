@@ -97,7 +97,7 @@ export class FakeGroupServer {
 }
 
 let run = 0;
-export async function member(s: FakeGroupServer, u: string, dev = `${u.toUpperCase()}1`, opts: { rotationMessages?: number; storeName?: string } = {}) {
+export async function member(s: FakeGroupServer, u: string, dev = `${u.toUpperCase()}1`, opts: { rotationMessages?: number; storeName?: string; state?: import("../src/index.js").GroupStateStore } = {}) {
   const storeName = opts.storeName ?? `${u}-${dev}-grp-${++run}`;
   const peers = new Map<string, StoredPeer>();
   const store = { get: async (k: string) => peers.get(k), set: async (k: string, v: StoredPeer) => void peers.set(k, v) };
@@ -111,7 +111,7 @@ export async function member(s: FakeGroupServer, u: string, dev = `${u.toUpperCa
   const prev = s.currentDevice.get(u);
   if (prev && prev !== dev) s.toDevice = s.toDevice.filter((t) => !(t.recipient === u && t.deviceId === prev));
   s.currentDevice.set(u, dev);
-  const groups = createGroupCrypto({ adapter, backend: s.backend(u), ...(opts.rotationMessages ? { rotationMessages: opts.rotationMessages } : {}) });
+  const groups = createGroupCrypto({ adapter, backend: s.backend(u), ...(opts.state ? { state: opts.state } : {}), ...(opts.rotationMessages ? { rotationMessages: opts.rotationMessages } : {}) });
   const verifier = createPeerVerifier({ adapter, http, store });
   const cursor = new Map<string, string>();
   return {
