@@ -1,4 +1,5 @@
 "use client";
+import { bindTab } from "@/lib/session-guard";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
@@ -34,6 +35,7 @@ function LockBadge() {
 
 export function ChatView({ username, userId = "" }: { username: string; userId?: string }) {
   const adapter = useMemo(() => chatAdapter(userId ? { id: userId, username } : undefined), [userId, username]);
+  useEffect(() => (userId ? bindTab(userId) : undefined), [userId]);
   const [safety, setSafety] = useState<SafetyInfo | null>(null);
   // E2EE-79: check the local device before anything that could publish keys.
   const [device, setDevice] = useState<"checking" | "ok" | "confirm" | "confirming">(adapter.deviceState ? "checking" : "ok");

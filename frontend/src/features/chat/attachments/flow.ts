@@ -1,3 +1,4 @@
+import { assertSameAccount } from "@/lib/session-guard";
 // E2EE attachments (E2EE-47) client flow. The server only ever sees opaque ciphertext,
 // its size and sha256. Key, name, MIME and ref travel ONLY inside the Olm-encrypted message.
 import type { AttachmentDescriptor, AttachmentMeta } from "@e2ee/crypto";
@@ -116,6 +117,7 @@ export function browserDeps(crypto: CryptoAtt): Deps {
   return {
     crypto,
     async api(method, path, body) {
+      assertSameAccount();
       let res: Response;
       try {
         res = await fetch(`/api${path}`, { method, credentials: "same-origin", cache: "no-store", headers: body === undefined ? {} : { "Content-Type": "application/json" }, body: body === undefined ? null : JSON.stringify(body) });
@@ -125,6 +127,7 @@ export function browserDeps(crypto: CryptoAtt): Deps {
       return json;
     },
     postForm: (url, form, onProgress) => new Promise((resolve, reject) => {
+      assertSameAccount();
       const x = new XMLHttpRequest();
       x.open("POST", url);
       x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
