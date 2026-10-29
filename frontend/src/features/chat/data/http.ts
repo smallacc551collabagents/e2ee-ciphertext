@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import { ApiError } from "@/lib/api/client";
-import * as w from "./wire";
+import * as w from "@e2ee/shared";
 
 // Typed client for Backend Phase 1 (PR #13). Not wired into the UI until #13 merges and
 // packages/crypto exposes encrypt/decrypt; see ./index.ts for the single swap point.

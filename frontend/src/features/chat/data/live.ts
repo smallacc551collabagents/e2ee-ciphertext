@@ -9,7 +9,7 @@ import type { HistoryStore } from "./history";
 import { browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
 import { onWipe, storeNameFor, wipeLocalE2EE } from "./wipe";
 import { IdentityChangedError, type ChatAdapter, type ConversationView, type MessageView, type SafetyInfo } from "./types";
-import type { ConversationWire, MessageWire } from "./wire";
+import type { ConversationWire, MessageWire } from "@e2ee/shared";
 
 export interface Me { id: string; username: string }
 

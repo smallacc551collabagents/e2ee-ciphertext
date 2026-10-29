@@ -84,6 +84,9 @@ importers:
       '@e2ee/crypto':
         specifier: workspace:*
         version: link:../packages/crypto
+      '@e2ee/shared':
+        specifier: workspace:*
+        version: link:../packages/shared
       next:
         specifier: '15'
         version: 15.5.28(@playwright/test@1.64.1)(@types/node@20.19.43)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -138,7 +141,11 @@ importers:
         specifier: ^2
         version: 2.1.9(@types/node@20.19.43)
 
-  packages/shared: {}
+  packages/shared:
+    dependencies:
+      zod:
+        specifier: '3'
+        version: 3.25.76
 
 packages:
 

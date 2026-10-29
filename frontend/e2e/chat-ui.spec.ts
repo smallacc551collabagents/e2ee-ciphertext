@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { conversationListSchema, messagePageSchema, sendMessageRequestSchema } from "../src/features/chat/data/wire";
+import { conversationListSchema, messagePageSchema, sendMessageRequestSchema } from "@e2ee/shared";
 import { initials, listTime } from "../src/features/chat/format";
 
 // Pure unit tests (no server).
