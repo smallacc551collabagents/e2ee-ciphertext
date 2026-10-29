@@ -1,4 +1,6 @@
-import type { z } from "zod";
+import { z } from "zod";
+
+const leaveGroupResponseSchema = z.object({ left: z.boolean(), groupDeleted: z.boolean().optional() });
 import { ApiError } from "@/lib/api/client";
 import * as w from "@e2ee/shared";
 
@@ -43,6 +45,13 @@ export const chatApi = {
     }
     return { acked };
   },
+  createGroup: (members: string[], encryptedMeta?: string) =>
+    call(w.createConversationResponseSchema, "/groups", { method: "POST", body: w.createGroupRequestSchema.parse({ members, ...(encryptedMeta ? { encryptedMeta } : {}) }) }),
+  addGroupMembers: (id: string, usernames: string[]) =>
+    call(w.createConversationResponseSchema, `/groups/${encodeURIComponent(id)}/members`, { method: "POST", body: w.addGroupMembersRequestSchema.parse({ usernames }) }),
+  removeGroupMember: (id: string, username: string) =>
+    call(w.createConversationResponseSchema, `/groups/${encodeURIComponent(id)}/members/${encodeURIComponent(username)}`, { method: "DELETE" }),
+  leaveGroup: (id: string) => call(leaveGroupResponseSchema, `/groups/${encodeURIComponent(id)}/leave`, { method: "POST" }),
   publishKeys: (req: w.PublishKeysRequest) => call(w.prekeyCountSchema, "/keys/publish", { method: "POST", body: w.publishKeysRequestSchema.parse(req) }),
   prekeyCount: () => call(w.prekeyCountSchema, "/keys/count"),
   prekeyBundle: (username: string) => call(w.prekeyBundleSchema, `/keys/bundle/${encodeURIComponent(username)}`),
