@@ -534,8 +534,12 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
         // Crypto hook: re-check every member's identity (new device -> pendingChange); only real changes block sending.
         // On open/poll: re-fetch each member's published identity so a new device is flagged now, not at first send.
         // Throttled per group: safety() also runs after every send, and /keys/identity is rate-limited (429 broke sends).
-        if (Date.now() - (identityCheckedAt.get(conversationId) ?? 0) > 60_000) {
+        // Kept in sessionStorage so a reload doesn't re-burst the rate-limited endpoint.
+        const ck = `e2ee.idCheck.${conversationId}`;
+        const last = Math.max(identityCheckedAt.get(conversationId) ?? 0, Number(sessionStorage.getItem(ck) ?? 0));
+        if (Date.now() - last > 60_000) {
           identityCheckedAt.set(conversationId, Date.now());
+          try { sessionStorage.setItem(ck, String(Date.now())); } catch { /* storage unavailable */ }
           for (const m of conv.members) if (m.id !== me.id) { try { note([await verifier.refresh(c.userIdFor(m.username))]); } catch { /* offline / 429 */ } }
         }
         let ids: { userId: string }[];
