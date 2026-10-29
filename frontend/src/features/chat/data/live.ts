@@ -9,7 +9,7 @@ import type { HistoryStore } from "./history";
 import { AttachmentError, browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
 import { closeLocalE2EE, onWipe, storeNameFor } from "./wipe";
 import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type MessageView, type SafetyInfo } from "./types";
-import type { ConversationWire, MessageWire } from "@e2ee/shared";
+import { undeliverableListSchema, type ConversationWire, type MessageWire } from "@e2ee/shared";
 
 export interface Me { id: string; username: string }
 
@@ -63,7 +63,7 @@ export function safeFileName(n: string): string {
 /** decrypt -> persist (awaited) -> ack. A message is acked only after its plaintext is stored. */
 export async function processIncoming(
   pending: readonly MessageWire[],
-  d: { receive(m: MessageWire): Promise<ReceiveResult>; history: Pick<HistoryStore, "put">; ack(ids: string[]): Promise<void>; onView(v: MessageView): void; display(t: string): string },
+  d: { receive(m: MessageWire): Promise<ReceiveResult>; history: Pick<HistoryStore, "put">; ack(ids: string[]): Promise<void>; onView(v: MessageView): void; display(t: string): string; failedText?(r: ReceiveResult | null): string },
 ): Promise<ReceiveResult[]> {
   const results: ReceiveResult[] = [];
   const persisted: string[] = [];
@@ -77,7 +77,7 @@ export async function processIncoming(
         persisted.push(m.id);
       } catch { /* not persisted -> not acked; redelivered later */ }
     }
-    d.onView({ id: m.id, fromMe: false, ...(r?.ok ? plaintextView(r.plaintext, d.display) : { text: "Unable to decrypt this message" }), sentAt: m.createdAt, status: "delivered" });
+    d.onView({ id: m.id, fromMe: false, ...(r?.ok ? plaintextView(r.plaintext, d.display) : { text: d.failedText?.(r) ?? "Unable to decrypt this message" }), sentAt: m.createdAt, status: "delivered" });
   }
   if (persisted.length) await d.ack(persisted).catch(() => undefined);
   return results;
@@ -116,6 +116,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     for (const r of rs) if (r.status === "changed" && r.current) changed.set(r.userId, r.current);
   };
 
+  let cryptoMod: typeof import("@e2ee/crypto") | null = null;
   let confirmedNewDevice = false;
   let state: Promise<DeviceState> | null = null;
   async function deviceState(): Promise<DeviceState> {
@@ -135,6 +136,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   function init() {
     ctx ??= (async () => {
       const c = await import("@e2ee/crypto");
+      cryptoMod = c;
       assertMayOpen(await deviceState(), confirmedNewDevice);
       const adapter = await c.createOlmAdapter(olmOptions(c, me, deviceIdFor(me.id), peers));
       await adapter.sync();
@@ -163,7 +165,10 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const peerId = c.userIdFor(peerOf(conv).username);
       if (changed.has(peerId) || (await peers.get(peerId))?.pendingChange) throw new IdentityChangedError(peerId);
       let devs = await adapter.peerIdentities(peerId);
-      if (!devs.length) devs = await adapter.refreshPeer(peerId);
+      // Encrypt to the accepted identity's device (after a device change the old one may still be listed).
+      const trusted = (await peers.get(peerId))?.identity.deviceId;
+      if (!devs.length || (trusted && !devs.some((d) => d.deviceId === trusted))) devs = await adapter.refreshPeer(peerId);
+      devs = [...devs].sort((a, b) => Number(b.deviceId === trusted) - Number(a.deviceId === trusted));
       if (!devs.length) throw new Error("peer has no keys");
       let env;
       try {
@@ -194,6 +199,20 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
    * historyStore; the server only supplies not-yet-acked messages, which are decrypted -> persisted -> acked once.
    * Messages already in local history are never decrypted or acked again. Order is by server seq.
    */
+  let resenderInst: ReturnType<typeof import("@e2ee/crypto").createResender> | null = null;
+  let ctxForResender: unknown = null;
+  function resender() {
+    if (!resenderInst || ctxForResender !== ctx) {
+      ctxForResender = ctx;
+      resenderInst = cryptoMod!.createResender({
+        parse: (r) => undeliverableListSchema.parse(r),
+        http, history: { list: async (cid, after, limit) => (await init()).texts.list(cid, after, limit) }, selfUserId: cryptoMod!.userIdFor(me.username),
+        send: async (cid, text, clientMsgId) => { await sendPlain(cid, text, clientMsgId); },
+      });
+    }
+    return resenderInst;
+  }
+
   async function listMessagesNow(conversationId: string): Promise<MessageView[]> {
     const { c, adapter, verifier, texts } = await init();
     const myUserId = c.userIdFor(me.username);
@@ -226,8 +245,15 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
         receive: async (m) => (await adapter.receive([c.decodeMessage(m)]))[0]!, display: c.toDisplayText,
         history: { put: (cid, seq, msg) => texts.put(cid, seq, msg) }, ack: (ids) => chatApi.ack(ids).then(() => undefined),
         onView: (v) => add(seqOf.get(v.id)!, v),
+        failedText: (r) => (r && !r.ok && c.isForPreviousDevice(r.envelope, adapter.identity()) ? c.PREVIOUS_DEVICE_TEXT : "Unable to decrypt this message"),
       });
       note(await verifier.onReceiveResults(results));
+    }
+    // Own messages the server flagged undeliverable (recipient replaced its device): show as not delivered.
+    const flagged = new Set((await resender().pendingResends(conversationId).catch(() => [])).map((p) => p.clientMsgId));
+    for (const e of thread.entries.values()) {
+      if (e.view.fromMe && e.view.clientId && flagged.has(e.view.clientId)) e.view = { ...e.view, status: "failed", undeliverable: "recipient-changed-device" };
+      else if (e.view.undeliverable && e.view.clientId && !flagged.has(e.view.clientId)) e.view = { ...e.view, status: "sent", undeliverable: undefined };
     }
     return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => e.view);
   }
@@ -281,6 +307,16 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const peerId = c.userIdFor(peerOf(conv).username);
       const id = changed.get(peerId) ?? (await peers.get(peerId))?.pendingChange;
       if (id) { await verifier.acceptNewIdentity(id); changed.delete(peerId); }
+      // Only now (user accepted the new safety number) re-send messages stranded on the peer's old device.
+      await resender().resendPending(conversationId).catch(() => undefined);
+    },
+    async pendingResends(conversationId) {
+      await init();
+      return (await resender().pendingResends(conversationId)).map((p) => ({ clientId: p.clientMsgId, messageId: p.messageId, hasText: p.text !== null }));
+    },
+    async resendPending(conversationId) {
+      await init();
+      return resender().resendPending(conversationId);
     },
     deviceState,
     async confirmNewDevice() {

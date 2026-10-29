@@ -9,6 +9,9 @@ export class FakeBackend {
   acked = new Set<string>();
   bodies: string[] = [];
   bundleFetches = 0;
+  noUndeliverableRoute = false;
+  /** Test knob: deliver flagged old-device ciphertext anyway (receiver fallback text). */
+  leakStale = false;
   identityFetches = 0;
   private canon(s: string, max: number) {
     const ok = /^[A-Za-z0-9+/]+={0,2}$/.test(s) && Buffer.from(s, 'base64').toString('base64') === s && Buffer.from(s, 'base64').length <= max;
@@ -33,6 +36,10 @@ export class FakeBackend {
         this.ids.set(user, { identityKey: body.identityKey, signedPrekey: body.signedPrekey });
         // Rotation drops unused OTKs (PR #13); uniqueness is scoped to unused keys (agreed follow-up).
         if (cur) this.otks.set(user, (this.otks.get(user) ?? []).filter((k) => k.consumed));
+        // Device replaced: undelivered messages to the old device become undeliverable (resend.ts contract).
+        if (cur && cur.identityKey.publicKey !== body.identityKey.publicKey) {
+          for (const m of this.messages) if (m.senderId !== user && !this.acked.has(`${user}:${m.id}`)) m.status = 'undeliverable_device_changed';
+        }
       }
       else if (body.signedPrekey) cur!.signedPrekey = body.signedPrekey;
       const list = this.otks.get(user) ?? [];
@@ -72,18 +79,28 @@ export class FakeBackend {
       if (!/^[A-Za-z0-9_-]{8,64}$/.test(body.clientMsgId)) throw Object.assign(new Error('clientMsgId'), { status: 400 });
       this.canon(body.ciphertext, 32 * 1024); this.ver(body.version);
       const dup = this.messages.find((x) => x.senderId === user && x.clientMsgId === body.clientMsgId);
+      if (dup && dup.status === 'undeliverable_device_changed') {
+        Object.assign(dup, { ciphertext: body.ciphertext, version: body.version }); delete dup.status;
+        return { message: dup, duplicate: false };
+      }
       if (dup) return { message: dup, duplicate: true };
       const seq = String(this.messages.filter((x) => x.conversationId === conversationId).length + 1);
       const msg = { id: `m${this.messages.length}`, conversationId, senderId: user, seq, createdAt: new Date().toISOString(), ...body };
       this.messages.push(msg);
       return { message: msg, duplicate: false };
     }
+    const um = /^\/conversations\/([^/?]+)\/undeliverable$/.exec(path);
+    if (method === 'GET' && um) {
+      if (this.noUndeliverableRoute) throw Object.assign(new Error('nf'), { status: 404 });
+      return { undeliverable: this.messages.filter((x) => x.conversationId === decodeURIComponent(um[1]!) && x.senderId === user && x.status === 'undeliverable_device_changed')
+        .map((x) => ({ messageId: x.id, clientMsgId: x.clientMsgId, seq: x.seq, recipientId: 'uuid-bob', reason: 'undeliverable_device_changed' })) };
+    }
     if (method === 'GET' && cm) {
       // PR #13: ascending seq, exclusive `after` cursor, limit 1..100.
       const q = new URLSearchParams(cm[2] ?? '');
       const after = BigInt(q.get('after') ?? '0');
       const limit = Math.min(100, Math.max(1, Number(q.get('limit') ?? '100')));
-      const all = this.messages.filter((x) => x.conversationId === decodeURIComponent(cm[1]!) && BigInt(x.seq) > after)
+      const all = this.messages.filter((x) => x.conversationId === decodeURIComponent(cm[1]!) && BigInt(x.seq) > after && !(x.senderId !== user && x.status && !this.leakStale))
         .sort((x, y) => Number(BigInt(x.seq) - BigInt(y.seq)));
       const page = all.slice(0, limit);
       return { messages: page, nextCursor: page.length ? page[page.length - 1].seq : null, hasMore: all.length > limit };
