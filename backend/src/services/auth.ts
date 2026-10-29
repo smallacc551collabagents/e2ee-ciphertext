@@ -121,6 +121,7 @@ export async function deleteAccount(c: import("../database/db.js").Queryable, us
   await c.query(`DELETE FROM password_reset_tokens WHERE user_id = $1`, [userId]);
   await c.query(`DELETE FROM one_time_prekeys WHERE user_id = $1`, [userId]);
   await c.query(`DELETE FROM identity_keys WHERE user_id = $1`, [userId]);
+  await c.query(`DELETE FROM resend_needed WHERE sender_id = $1 OR recipient_id = $1`, [userId]);
   await c.query(`DELETE FROM message_deliveries WHERE recipient_id = $1`, [userId]);
   await c.query(`DELETE FROM messages WHERE sender_id = $1`, [userId]);
   await c.query(`DELETE FROM conversation_members WHERE user_id = $1`, [userId]);
