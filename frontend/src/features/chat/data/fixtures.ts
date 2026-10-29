@@ -1,3 +1,4 @@
+import { ApiError } from "@/lib/api/client";
 import type { ChatAdapter, ConversationView, MessageView } from "./types";
 
 // DEV/TEST ONLY. Selected only when NEXT_PUBLIC_CHAT_FIXTURES=1 AND NODE_ENV !== "production"
@@ -32,6 +33,16 @@ const delay = <T,>(v: T) => new Promise<T>((r) => setTimeout(() => r(v), 150));
 export const fixturesAdapter: ChatAdapter = {
   id: "fixtures",
   listConversations: () => delay(convos.map((c) => ({ ...c }))),
+  async createConversation(username) {
+    await delay(null);
+    const u = username.trim().replace(/^@/, "");
+    if (u.toLowerCase() === "nobody") throw new ApiError(404, "not_found", "User not found.");
+    const existing = convos.find((c) => c.name.toLowerCase() === u.toLowerCase());
+    if (existing) return { ...existing };
+    const c: ConversationView = { id: `n-${u}`, name: u, preview: "", lastActivityAt: new Date().toISOString(), unread: 0 };
+    convos.unshift(c); messages[c.id] = [];
+    return { ...c };
+  },
   listMessages: (id) => delay([...(messages[id] ?? [])]),
   async sendMessage(id, text, clientId) {
     await delay(null);

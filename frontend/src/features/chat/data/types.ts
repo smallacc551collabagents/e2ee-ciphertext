@@ -46,4 +46,6 @@ export interface ChatAdapter {
   /** Optional: safety number + identity-changed state (live adapter only). */
   safety?(conversationId: string): Promise<SafetyInfo>;
   acceptNewIdentity?(conversationId: string): Promise<void>;
+  /** Start (or reopen) a direct conversation. Existing conversations are returned, not duplicated. */
+  createConversation?(username: string): Promise<ConversationView>;
 }

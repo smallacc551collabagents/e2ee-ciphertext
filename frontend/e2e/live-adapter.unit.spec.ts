@@ -97,3 +97,22 @@ test("safeFileName strips path separators/control chars and bounds length", () =
   expect(safeFileName("")).toBe("file");
   expect(safeFileName("a".repeat(300))).toHaveLength(255);
 });
+
+test("live createConversation POSTs same-origin /api/conversations and returns the peer view", async () => {
+  const calls: { url: string; init: RequestInit }[] = [];
+  const g = globalThis as Record<string, unknown>;
+  const orig = g.fetch;
+  g.fetch = async (url: string, init: RequestInit) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ conversation: { id: "c9", kind: "direct", members: [{ id: "1", username: "alice" }, { id: "2", username: "bob" }] } }), { status: 201 });
+  };
+  try {
+    const { liveAdapter } = await import("../src/features/chat/data/live");
+    const v = await liveAdapter({ id: "1", username: "alice" }, { put: async () => {}, list: async () => [], lastSeq: async () => null, clear: async () => {}, close: () => {} } as never).createConversation!("@bob");
+    expect(v).toMatchObject({ id: "c9", name: "bob" });
+    expect(calls[0]!.url).toBe("/api/conversations");
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(calls[0]!.init.credentials).toBe("same-origin");
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ username: "bob" });
+  } finally { g.fetch = orig; }
+});

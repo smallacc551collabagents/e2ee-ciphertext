@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { chatAdapter, FeatureUnavailableError, IdentityChangedError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
 import { AttachmentError, type Phase } from "./attachments/flow";
+import { newChatErrorMessage, validatePeerUsername } from "./newChat";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
 
 const STATUS_LABEL: Record<MessageStatus, string> = {
@@ -37,6 +38,34 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   const [activeId, setActiveId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Load<MessageView[]>>({ state: "loading" });
   const [query, setQuery] = useState("");
+  const [newChat, setNewChat] = useState<null | { value: string; error?: string; busy?: boolean }>(null);
+  const newChatBtn = useRef<HTMLButtonElement>(null);
+  const closeNewChat = () => { setNewChat(null); newChatBtn.current?.focus(); };
+  const newChatInput = useRef<HTMLInputElement>(null);
+  const newChatOpen = !!newChat, newChatBusy = !!newChat?.busy, newChatErr = newChat?.error;
+  useEffect(() => {
+    if (!newChatOpen || newChatBusy) return;
+    newChatInput.current?.focus();
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setNewChat(null); newChatBtn.current?.focus(); } };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [newChatOpen, newChatBusy, newChatErr]);
+  async function submitNewChat(e: FormEvent) {
+    e.preventDefault();
+    if (!newChat || newChat.busy || !adapter.createConversation) return;
+    const name = newChat.value.trim().replace(/^@/, "");
+    const invalid = validatePeerUsername(name, username);
+    if (invalid) { setNewChat({ value: newChat.value, error: invalid }); return; }
+    setNewChat({ value: newChat.value, busy: true });
+    try {
+      const conv = await adapter.createConversation(name);
+      setConvos((s) => (s.state === "ready" ? { ...s, data: [conv, ...s.data.filter((c) => c.id !== conv.id)] } : { state: "ready", data: [conv] }));
+      setNewChat(null);
+      setActiveId(conv.id);
+    } catch (err) {
+      setNewChat({ value: newChat.value, error: newChatErrorMessage(err, name) });
+    }
+  }
   const listEnd = useRef<HTMLLIElement>(null);
 
   const loadConvos = useCallback(() => {
@@ -133,10 +162,29 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   return (
     <div className="flex h-full bg-slate-50">
       {/* Sidebar: full width on mobile when no conversation is open */}
+      {newChat && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget && !newChat.busy) closeNewChat(); }}>
+          <form role="dialog" aria-modal="true" aria-labelledby="new-chat-title" onSubmit={submitNewChat}
+            className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
+            <h2 id="new-chat-title" className="text-lg font-semibold">New chat</h2>
+            <label htmlFor="new-chat-username" className="mt-3 block text-sm text-slate-600">Username</label>
+            <input ref={newChatInput} id="new-chat-username" autoComplete="off" spellCheck={false} maxLength={33} value={newChat.value} disabled={newChat.busy}
+              aria-invalid={!!newChat.error} aria-describedby={newChat.error ? "new-chat-error" : undefined}
+              onChange={(e) => setNewChat({ value: e.target.value })}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            {newChat.error && <p id="new-chat-error" role="alert" className="mt-2 text-sm text-red-600">{newChat.error}</p>}
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={closeNewChat} disabled={newChat.busy} className="rounded-lg px-4 py-2 text-sm text-slate-600 hover:bg-slate-100">Cancel</button>
+              <button type="submit" disabled={newChat.busy} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{newChat.busy ? "Starting…" : "Start chat"}</button>
+            </div>
+          </form>
+        </div>
+      )}
       <aside aria-label="Conversations" className={`${active ? "hidden md:flex" : "flex"} w-full shrink-0 flex-col border-r border-slate-200 bg-white md:w-[360px]`}>
         <div className="flex items-center justify-between px-4 pb-3 pt-5">
           <h2 className="text-2xl font-bold">Chats</h2>
-          <button type="button" title="New chat — coming soon" aria-label="New chat"
+          <button ref={newChatBtn} type="button" title="New chat" aria-label="New chat" aria-haspopup="dialog" disabled={!adapter.createConversation}
+            onClick={() => setNewChat({ value: "" })}
             className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-50 text-lg text-blue-700 disabled:opacity-50">+</button>
         </div>
         <div className="px-2 pb-3">
@@ -162,7 +210,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
               <button type="button" onClick={loadConvos} className="font-medium underline">Retry</button>
             </div>
           )}
-          {convos.state === "ready" && list.length === 0 && <p className="p-4 text-sm text-slate-500">No conversations yet.</p>}
+          {convos.state === "ready" && list.length === 0 && <p className="p-4 text-sm text-slate-500">No conversations yet. Use <span aria-hidden>+</span><span className="sr-only">New chat</span> to start one.</p>}
           {convos.state === "ready" && list.length > 0 && filtered.length === 0 && <p className="p-4 text-sm text-slate-500">No matches.</p>}
           {filtered.length > 0 && (
             <ul className="space-y-1 pb-2">

@@ -42,6 +42,39 @@ test.describe("chat UI", () => {
     await expect(page.getByText("Ava Testwell")).toHaveCount(0);
   });
 
+  test("new chat dialog: validation, not found, existing reopens, new selects + composer enabled", async ({ page }) => {
+    test.skip(!fixtures, "needs NEXT_PUBLIC_CHAT_FIXTURES=1 server");
+    const open = page.getByRole("button", { name: "New chat" });
+    await expect(open).toBeEnabled();
+    await open.click();
+    const dialog = page.getByRole("dialog", { name: "New chat" });
+    const input = dialog.getByLabel("Username");
+    await expect(input).toBeFocused();
+    await dialog.getByRole("button", { name: "Start chat" }).click();
+    await expect(dialog.getByRole("alert")).toHaveText("Enter a username.");
+    await input.fill("a b");
+    await dialog.getByRole("button", { name: "Start chat" }).click();
+    await expect(input).toHaveAttribute("aria-invalid", "true");
+    await input.fill("nobody");
+    await dialog.getByRole("button", { name: "Start chat" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("No user named");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(open).toBeFocused();
+    await open.click();
+    await page.getByRole("dialog").getByLabel("Username").fill("new_friend");
+    await page.getByRole("dialog").getByRole("button", { name: "Start chat" }).click();
+    await expect(page.getByRole("heading", { name: "new_friend" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
+    await page.getByRole("textbox", { name: "Message" }).fill("first message");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByTestId("bubble").last()).toContainText("Sent");
+    await open.click();
+    await page.getByRole("dialog").getByLabel("Username").fill("new_friend");
+    await page.getByRole("dialog").getByRole("button", { name: "Start chat" }).click();
+    await expect(page.getByRole("button", { name: /new_friend/ })).toHaveCount(1);
+  });
+
   test("fixtures: list, open, send, failed+retry, escaping, mobile back", async ({ page }) => {
     test.skip(!fixtures, "needs NEXT_PUBLIC_CHAT_FIXTURES=1 server");
     await page.getByRole("button", { name: /Ava Testwell/ }).click();
