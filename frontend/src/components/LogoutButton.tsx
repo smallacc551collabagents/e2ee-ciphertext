@@ -2,9 +2,9 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { signout } from "@/lib/api/client";
-import { wipeLocalE2EE } from "@/features/chat/data/wipe";
+import { closeLocalE2EE, wipeLocalE2EE } from "@/features/chat/data/wipe";
 
-export function LogoutButton({ className = "" }: { className?: string }) {
+export function LogoutButton({ className = "", removeData = false }: { className?: string; removeData?: boolean }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   return (
@@ -14,11 +14,12 @@ export function LogoutButton({ className = "" }: { className?: string }) {
         await signout().catch(() => undefined); // backend clears e2ee_session via the first-party proxy
         // Belt and braces: same-origin POST that deletes the cookie locally (never a GET).
         await fetch("/session/expired", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
-        await wipeLocalE2EE().catch(() => undefined); // delete <storeName>, <storeName>-wrap and caches
+        if (removeData) await wipeLocalE2EE().catch(() => undefined); // explicit: delete keys, history, caches
+        else closeLocalE2EE(); // keep this device so re-login has no new-device screen
         router.replace("/login");
         router.refresh();
       }}>
-      {pending ? "Signing out…" : "Log out"}
+      {pending ? "Signing out…" : removeData ? "Log out and remove this browser's data" : "Log out"}
     </button>
   );
 }

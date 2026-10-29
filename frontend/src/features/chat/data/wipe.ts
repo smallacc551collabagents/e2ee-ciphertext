@@ -37,3 +37,11 @@ export async function wipeLocalE2EE(deleteState?: Deleter): Promise<void> {
     if (k?.startsWith("e2ee.")) localStorage.removeItem(k);
   }
 }
+
+/** Normal sign-out / session expiry: close open stores but KEEP this browser's keys and history,
+ *  so signing back in here resumes the same device (no new-device screen). Use wipeLocalE2EE only
+ *  for account delete or an explicit "remove this browser's data". */
+export function closeLocalE2EE(): void {
+  closers.forEach((c) => { try { c(); } catch { /* ignore */ } });
+  closers.clear();
+}
