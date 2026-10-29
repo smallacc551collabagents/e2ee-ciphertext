@@ -6,6 +6,8 @@ import { useId, useState, type FormEvent } from "react";
 import { ApiError, signin, signup } from "@/lib/api/client";
 import { safeNext } from "@/lib/safe-next";
 import { credentialsSchema } from "@/lib/api/schemas";
+import { TestAccountCards } from "@/components/TestAccountCards";
+import { TEST_ACCOUNTS_ENABLED, signInOrSignUp } from "@/lib/test-accounts";
 
 type Mode = "login" | "signup";
 type FieldErrors = Partial<Record<"username" | "password", string>>;
@@ -16,10 +18,29 @@ export function AuthForm({ mode }: { mode: Mode }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [quick, setQuick] = useState<string | null>(null);
   const isSignup = mode === "signup";
+
+  async function onQuick(username: string) {
+    if (pending) return; // a submit or another card is already in flight
+    setError(null);
+    setFieldErrors({});
+    setPending(true);
+    setQuick(username);
+    try {
+      const user = await signInOrSignUp(username, signin, signup);
+      setActiveUser(user.id);
+      window.location.replace(safeNext(params.get("next")));
+    } catch (err) {
+      setError(err instanceof ApiError ? `${username}: ${err.message}` : "Something went wrong.");
+      setPending(false);
+      setQuick(null);
+    }
+  }
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (pending) return;
     setError(null);
     const fd = new FormData(e.currentTarget);
     const parsed = credentialsSchema.safeParse({ username: fd.get("username"), password: fd.get("password") });
@@ -43,6 +64,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
   return (
     <main className="flex min-h-screen items-center justify-center p-4">
       <div className="w-full max-w-sm rounded-2xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
+        {TEST_ACCOUNTS_ENABLED && <TestAccountCards busy={pending} active={quick} onPick={onQuick} />}
         <h1 className="text-2xl font-semibold">{isSignup ? "Create your account" : "Sign in"}</h1>
         <p className="mt-1 flex items-center gap-1 text-sm text-slate-500">
           <span aria-hidden>🔒</span> Your private keys stay on your devices
