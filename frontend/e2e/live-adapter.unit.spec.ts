@@ -116,3 +116,12 @@ test("live createConversation POSTs same-origin /api/conversations and returns t
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ username: "bob" });
   } finally { g.fetch = orig; }
 });
+
+test("keyedSerial: same-key tasks never overlap (no double-decrypt from load + poll), other keys run freely", async () => {
+  const { keyedSerial } = await import("../src/features/chat/data/live");
+  const serial = keyedSerial(); let active = 0, max = 0; const order: string[] = [];
+  const task = (n: string, fail = false) => async () => { active++; max = Math.max(max, active); await new Promise((r) => setTimeout(r, 20)); active--; order.push(n); if (fail) throw new Error(n); return n; };
+  const r = await Promise.allSettled([serial("c1", task("a")), serial("c1", task("b", true)), serial("c1", task("c"))]);
+  expect(max).toBe(1); expect(order).toEqual(["a", "b", "c"]); expect(r.map((x) => x.status)).toEqual(["fulfilled", "rejected", "fulfilled"]);
+  active = 0; max = 0; await Promise.all([serial("x", task("x")), serial("y", task("y"))]); expect(max).toBe(2);
+});

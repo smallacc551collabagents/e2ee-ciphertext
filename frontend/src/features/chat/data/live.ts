@@ -83,7 +83,24 @@ export async function processIncoming(
   return results;
 }
 
+/**
+ * Run tasks one at a time per key. listMessages for a conversation must never overlap: the initial load and
+ * the 4s poll would otherwise both fetch the same undelivered messages and decrypt them twice. The second
+ * decrypt fails (ratchet keys are single-use), producing "Unable to decrypt" bubbles and out-of-order views.
+ */
+export function keyedSerial() {
+  const tails = new Map<string, Promise<unknown>>();
+  return <T>(key: string, task: () => Promise<T>): Promise<T> => {
+    const run = (tails.get(key) ?? Promise.resolve()).then(task, task);
+    const tail = run.catch(() => undefined);
+    tails.set(key, tail);
+    void tail.then(() => { if (tails.get(key) === tail) tails.delete(key); });
+    return run;
+  };
+}
+
 export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
+  const serial = keyedSerial();
   const threads = new Map<string, { after?: string; views: MessageView[]; cache?: Map<string, string> }>();
   const peers = idbKv<StoredPeer>(`${storeNameFor(me.id)}-peers`);
   const convos = new Map<string, ConversationWire>();
@@ -145,16 +162,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
 
   let display: (t: string) => string = (t) => t;
 
-  return {
-    id: "live",
-    async listConversations(): Promise<ConversationView[]> {
-      await init();
-      const { conversations } = await chatApi.listConversations();
-      conversations.forEach((v) => convos.set(v.id, v));
-      void refreshStale().catch(() => undefined);
-      return conversations.map((v) => ({ id: v.id, name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }));
-    },
-    async listMessages(conversationId) {
+  async function listMessagesNow(conversationId: string): Promise<MessageView[]> {
       const { c, adapter, verifier, texts } = await init();
       const thread = threads.get(conversationId) ?? { views: [] };
       threads.set(conversationId, thread);
@@ -189,6 +197,20 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const seen = new Set(thread.views.map((v) => v.id));
       thread.views = [...thread.views, ...out.filter((v) => !seen.has(v.id))].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
       return thread.views;
+  }
+
+
+  return {
+    id: "live",
+    async listConversations(): Promise<ConversationView[]> {
+      await init();
+      const { conversations } = await chatApi.listConversations();
+      conversations.forEach((v) => convos.set(v.id, v));
+      void refreshStale().catch(() => undefined);
+      return conversations.map((v) => ({ id: v.id, name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }));
+    },
+    listMessages(conversationId) {
+      return serial(conversationId, () => listMessagesNow(conversationId));
     },
     async createConversation(username) {
       const { conversation: v } = await chatApi.createConversation(username.trim().replace(/^@/, ""));
