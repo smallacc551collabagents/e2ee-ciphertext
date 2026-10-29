@@ -20,6 +20,7 @@ import {
 import { withLock } from './lock.js';
 import { getOrCreateStoreKey } from './store-key.js';
 import type { IdentityGate } from './peer-trust.js';
+import type { GroupPrimitives, GroupDecryptResult, GroupShareResult, ToDeviceResult } from './groups.js';
 
 const ALG = 'm.olm.v1.curve25519-aes-sha2' as const;
 const MESSAGE_TYPE = 'org.e2ee.message.v1';
@@ -58,7 +59,9 @@ export interface OlmAdapterOptions {
   readonly identityGate: IdentityGate;
 }
 
-export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoAdapter> {
+export type OlmAdapter = CryptoAdapter & GroupPrimitives;
+
+export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<OlmAdapter> {
   const gate = (opts as Partial<OlmAdapterOptions> | undefined)?.identityGate;
   if (!gate || typeof gate.assertTrusted !== 'function' || typeof gate.assertUserNotPending !== 'function') {
     throw new CryptoError('INVALID_OPTIONS', 'createOlmAdapter requires an identityGate (see createIdentityGate)');
@@ -121,7 +124,176 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     }
   }
 
-  const adapter: CryptoAdapter = {
+  const MEGOLM = 'm.megolm.v1.aes-sha2';
+  const GROUP_EVENT = 'org.e2ee.group.message.v1';
+  const WEEK_US = 7n * 24n * 60n * 60n * 1000n * 1000n;
+
+  const roomOf = (groupId: string): string => {
+    if (!/^[A-Za-z0-9._~-]{1,128}$/.test(groupId)) throw new CryptoError('INVALID_OPTIONS', 'Invalid group id');
+    return `!${groupId}:e2ee.local`;
+  };
+
+  const group: GroupPrimitives = {
+    shareGroupKey: (groupId, userIds, o) =>
+      withLock(lockName, async () => {
+        guard();
+        const room = new M.RoomId(roomOf(groupId));
+        if (o.rotate) await machine.invalidateGroupSession(room);
+        const others = [...new Set(userIds)].filter((u) => u !== self.userId);
+        // Re-query so a replaced device is dropped and only the CURRENT published device is known.
+        if (others.length) {
+          const ids = () => others.map((u) => new M.UserId(u));
+          await machine.updateTrackedUsers(ids());
+          await machine.receiveSyncChanges('[]', new M.DeviceLists(ids()), new Map());
+          await flush();
+        }
+        const trusted: string[] = [];
+        const pending: string[] = [];
+        for (const u of others) {
+          try {
+            await gate.assertUserNotPending(u);
+            const devs = (await machine.getUserDevices(new M.UserId(u))).devices();
+            if (!devs.length) throw new CryptoError('NO_DEVICE', 'No published device');
+            for (const d of devs) {
+              await gate.assertTrusted({
+                userId: u,
+                deviceId: d.deviceId.toString(),
+                ed25519: d.ed25519Key?.toBase64() ?? '',
+                curve25519: d.curve25519Key?.toBase64() ?? '',
+              });
+            }
+            trusted.push(u);
+          } catch (e) {
+            if (e instanceof CryptoError && (e.code === 'IDENTITY_CHANGED' || e.code === 'NO_DEVICE')) pending.push(u);
+            else throw e;
+          }
+        }
+        const users = () => [self.userId, ...trusted].map((u) => new M.UserId(u));
+        const claim = await machine.getMissingSessions(users());
+        if (claim) await send(claim.id, M.RequestType.KeysClaim, claim.body);
+        const settings = new M.EncryptionSettings();
+        settings.rotationPeriodMessages = BigInt(o.rotationMessages ?? 100);
+        settings.rotationPeriod = o.rotationUs ?? WEEK_US;
+        settings.historyVisibility = M.HistoryVisibility.Joined;
+        settings.sharingStrategy = M.CollectStrategy.deviceBasedStrategy(false, false);
+        const reqs = await machine.shareRoomKey(room, users(), settings);
+        const envelopes: CiphertextEnvelope[] = [];
+        for (const r of reqs) {
+          const body = JSON.parse(r.body) as { messages: Record<string, Record<string, Record<string, unknown>>> };
+          for (const [userId, devs] of Object.entries(body.messages)) {
+            for (const [deviceId, content] of Object.entries(devs)) {
+              if (userId === self.userId && deviceId === self.deviceId) continue;
+              envelopes.push({ v: 1, alg: ALG, sender: self, recipient: { userId, deviceId }, content });
+            }
+          }
+          // The caller delivers the envelopes; on delivery failure it must call shareGroupKey({rotate:true}).
+          await machine.markRequestAsSent(r.id, r.type, '{}');
+        }
+        return { envelopes, pending, trusted } satisfies GroupShareResult;
+      }),
+
+    encryptGroup: (groupId, plaintext) =>
+      withLock(lockName, async () => {
+        guard();
+        const c = await machine.encryptRoomEvent(new M.RoomId(roomOf(groupId)), GROUP_EVENT, JSON.stringify({ body: plaintext }));
+        return JSON.parse(c) as Record<string, unknown>;
+      }),
+
+    decryptGroup: (groupId, ev) =>
+      withLock(lockName, async (): Promise<GroupDecryptResult> => {
+        guard();
+        const sessionId = String((ev.content as { session_id?: unknown }).session_id ?? '');
+        if ((ev.content as { algorithm?: unknown }).algorithm !== MEGOLM) {
+          return { ok: false, code: 'INVALID_ENVELOPE', sessionId };
+        }
+        const event = {
+          type: 'm.room.encrypted', event_id: `$${ev.eventId}`, sender: ev.sender.userId,
+          origin_server_ts: ev.ts, room_id: roomOf(groupId), content: ev.content,
+        };
+        try {
+          const d = await machine.decryptRoomEvent(JSON.stringify(event), new M.RoomId(roomOf(groupId)), new M.DecryptionSettings(M.TrustRequirement.Untrusted));
+          const raw = JSON.parse(d.event) as { type?: string; room_id?: string; content?: { body?: unknown } };
+          let deviceOk = d.senderDevice?.toString() === ev.sender.deviceId;
+          if (!d.senderDevice) {
+            // Session imported via a key response: bind it to the claimed device by its curve25519 key.
+            const dev = await machine.getDevice(new M.UserId(ev.sender.userId), new M.DeviceId(ev.sender.deviceId));
+            deviceOk = !!dev && dev.curve25519Key?.toBase64() === d.senderCurve25519Key;
+          }
+          if (!deviceOk || d.sender.toString() !== ev.sender.userId) {
+            return { ok: false, code: 'IDENTITY_CHANGED', sessionId };
+          }
+          if (raw.type !== GROUP_EVENT || raw.room_id !== roomOf(groupId) || typeof raw.content?.body !== 'string') {
+            return { ok: false, code: 'DECRYPT_FAILED', sessionId };
+          }
+          return { ok: true, plaintext: raw.content.body, senderCurve25519: d.senderCurve25519Key, sessionId };
+        } catch (e) {
+          const code = (e as { code?: unknown }).code;
+          if (code === M.DecryptionErrorCode.MissingRoomKey || code === M.DecryptionErrorCode.UnknownMessageIndex) {
+            return { ok: false, code: 'MISSING_ROOM_KEY', sessionId };
+          }
+          return { ok: false, code: 'DECRYPT_FAILED', sessionId };
+        }
+      }),
+
+    exportGroupSession: (groupId, sessionId) =>
+      withLock(lockName, async () => {
+        guard();
+        const json = await machine.exportRoomKeys(
+          (s) => s.roomId.toString() === roomOf(groupId) && s.sessionId === sessionId && s.senderKey.toBase64() === ident.curve25519,
+        );
+        const arr = JSON.parse(json) as unknown[];
+        return arr.length ? json : null;
+      }),
+
+    importGroupSession: (groupId, sessionId, senderCurve25519, json) =>
+      withLock(lockName, async () => {
+        guard();
+        let arr: { room_id?: string; session_id?: string; sender_key?: string }[];
+        try { arr = JSON.parse(json); } catch { return false; }
+        // Only accept exactly the requested session, created by the device that answered.
+        if (!Array.isArray(arr) || arr.length !== 1) return false;
+        const k = arr[0]!;
+        if (k.room_id !== roomOf(groupId) || k.session_id !== sessionId || k.sender_key !== senderCurve25519) return false;
+        const r = await machine.importExportedRoomKeys(json, () => {});
+        return r.importedCount > 0 || r.totalCount > 0;
+      }),
+
+    receiveToDevice: (envelopes) =>
+      withLock(lockName, async () => {
+        guard();
+        const out: ToDeviceResult[] = [];
+        for (const env of envelopes) {
+          if (env.v !== 1 || env.alg !== ALG || env.recipient.userId !== self.userId || env.recipient.deviceId !== self.deviceId) {
+            out.push({ envelope: env, kind: 'invalid' });
+            continue;
+          }
+          const known = await machine.getDevice(new M.UserId(env.sender.userId), new M.DeviceId(env.sender.deviceId));
+          if (!known) {
+            await machine.updateTrackedUsers([new M.UserId(env.sender.userId)]);
+            await machine.receiveSyncChanges('[]', new M.DeviceLists([new M.UserId(env.sender.userId)]), new Map());
+            await flush();
+          }
+          const event = { type: 'm.room.encrypted', sender: env.sender.userId, content: env.content };
+          const r = (await machine.receiveSyncChanges(JSON.stringify([event]), new M.DeviceLists(), new Map()))[0];
+          let res: ToDeviceResult = { envelope: env, kind: 'invalid' };
+          if (r && r.type === M.ProcessedToDeviceEventType.Decrypted) {
+            const d = r as M.DecryptedToDeviceEvent;
+            const raw = JSON.parse(d.rawEvent) as { type?: string; sender?: string; content?: { body?: unknown } };
+            if (d.encryptionInfo.senderDevice?.toString() === env.sender.deviceId && raw.sender === env.sender.userId) {
+              if (raw.type === 'm.room_key') res = { envelope: env, kind: 'room_key' };
+              else if (raw.type === MESSAGE_TYPE && typeof raw.content?.body === 'string') {
+                res = { envelope: env, kind: 'message', plaintext: raw.content.body, senderCurve25519: d.encryptionInfo.senderCurve25519Key };
+              }
+            }
+          }
+          out.push(res);
+        }
+        return out;
+      }),
+  };
+
+  const adapter: OlmAdapter = {
+    ...group,
     identity: () => ident,
 
     sync: () =>
