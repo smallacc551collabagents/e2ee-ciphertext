@@ -34,7 +34,15 @@ export const chatApi = {
     call(w.messagePageSchema, `/conversations/${encodeURIComponent(id)}/messages?${new URLSearchParams({ ...(after ? { after } : {}), limit: String(limit) })}`),
   sendMessage: (id: string, req: z.input<typeof w.sendMessageRequestSchema>) =>
     call(w.sendMessageResponseSchema, `/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: w.sendMessageRequestSchema.parse(req) }),
-  ack: (messageIds: string[]) => call(w.ackResponseSchema, "/messages/ack", { method: "POST", body: w.ackRequestSchema.parse({ messageIds }) }),
+  /** Never sends an empty list (server rejects it); de-duplicates and chunks to the 500-id cap. */
+  async ack(messageIds: string[]): Promise<{ acked: number }> {
+    const ids = [...new Set(messageIds)];
+    let acked = 0;
+    for (let i = 0; i < ids.length; i += 500) {
+      acked += (await call(w.ackResponseSchema, "/messages/ack", { method: "POST", body: w.ackRequestSchema.parse({ messageIds: ids.slice(i, i + 500) }) })).acked;
+    }
+    return { acked };
+  },
   publishKeys: (req: w.PublishKeysRequest) => call(w.prekeyCountSchema, "/keys/publish", { method: "POST", body: w.publishKeysRequestSchema.parse(req) }),
   prekeyCount: () => call(w.prekeyCountSchema, "/keys/count"),
   prekeyBundle: (username: string) => call(w.prekeyBundleSchema, `/keys/bundle/${encodeURIComponent(username)}`),

@@ -45,9 +45,14 @@ export const messagePageSchema = z.object({ messages: z.array(messageSchema), ne
 export const ackRequestSchema = z.object({ messageIds: z.array(uuidSchema).min(1).max(500).refine((a) => new Set(a).size === a.length, "unique items") }).strict();
 export const ackResponseSchema = z.object({ acked: z.number().int().nonnegative() });
 
-const pubKey = z.object({ publicKey: capped(KEY_MAX_BYTES), version }).strict();
-const signedPrekey = z.object({ keyId: keyIdSchema, publicKey: capped(KEY_MAX_BYTES), signature: capped(KEY_MAX_BYTES), version }).strict();
-const oneTimePrekey = z.object({ keyId: keyIdSchema, publicKey: capped(KEY_MAX_BYTES), version }).strict();
+// Key shapes: strict for requests; responses (prekeyBundleSchema) use the non-strict base so fields the
+// server adds later are stripped, not rejected. Rule: request schemas .strict(), response schemas never.
+const pubKeyBase = z.object({ publicKey: capped(KEY_MAX_BYTES), version });
+const signedPrekeyBase = z.object({ keyId: keyIdSchema, publicKey: capped(KEY_MAX_BYTES), signature: capped(KEY_MAX_BYTES), version });
+const oneTimePrekeyBase = z.object({ keyId: keyIdSchema, publicKey: capped(KEY_MAX_BYTES), version });
+const pubKey = pubKeyBase.strict();
+const signedPrekey = signedPrekeyBase.strict();
+const oneTimePrekey = oneTimePrekeyBase.strict();
 export const publishKeysRequestSchema = z.object({
   identityKey: pubKey.optional(),
   signedPrekey: signedPrekey.optional(),
@@ -59,7 +64,7 @@ export const messagePageQuerySchema = z.object({ after: z.string().regex(/^[0-9]
 export const prekeyCountSchema = z.object({ oneTimePrekeyCount: z.number().int().nonnegative() });
 export const prekeyBundleSchema = z.object({
   userId: z.string(), username: z.string(),
-  identityKey: pubKey, signedPrekey, oneTimePrekey: oneTimePrekey.nullable(),
+  identityKey: pubKeyBase, signedPrekey: signedPrekeyBase, oneTimePrekey: oneTimePrekeyBase.nullable(),
 });
 
 export type ConversationWire = z.infer<typeof conversationSchema>;
