@@ -1,3 +1,5 @@
+> **Update 2026-10-29:** the server contract that shipped is the one in `@e2ee/shared` (PR #55) and the backend (PR #56), and the crypto package matches it. The differences from the draft below: there is no `GET /groups/:id` (the group is read from `GET /conversations`, `kind:"group"`, `adminId`, `membershipVersion`); add takes `{usernames}`; a stale send returns **409 `membership_changed`** `{membershipVersion, members}`; leave returns `{groupDeleted}`; system events are `kind:"system"`; to-device is `{recipient, ciphertext, type, version}` with no device id, and the queue is dropped when the recipient's identity changes; a removed member gets 404. The draft follows for reference.
+
 # Group chat E2EE — crypto API + expected server contract (proposal, E2EE-53 / Phase 6)
 
 Owner: Crypto. Server contract owner: Backend (this is what the client needs; Backend may rename paths, tell Crypto).
