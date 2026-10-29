@@ -4,6 +4,7 @@ import cookie from "@fastify/cookie";
 import { db } from "./database/db.js";
 import { authRoutes } from "./routes/auth.js";
 import { transportRoutes } from "./routes/transport.js";
+import { groupRoutes } from "./routes/groups.js";
 import { attachmentRoutes } from "./routes/attachments.js";
 
 import rateLimit from "@fastify/rate-limit";
@@ -75,6 +76,7 @@ export function buildApp(): FastifyInstance {
 
   void app.register(authRoutes, { prefix: "/auth" });
   void app.register(transportRoutes);
+  void app.register(groupRoutes);
   void app.register(attachmentRoutes);
 
   // TODO(Phase 0): authenticated WebSocket doorbell (backend/src/websocket).

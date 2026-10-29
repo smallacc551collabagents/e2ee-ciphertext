@@ -15,19 +15,21 @@ datasource db {
 }
 
 model User {
-  id           String               @id @default(uuid()) @db.Uuid
+  id               String               @id @default(uuid()) @db.Uuid
   /// Stored normalized (lowercase); unique => case-insensitive uniqueness.
-  username     String               @unique
-  passwordHash String               @map("password_hash")
-  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
-  sessions     Session[]
-  resetTokens  PasswordResetToken[]
-  identityKey  IdentityKey?
-  oneTimeKeys  OneTimePrekey[]
-  memberships  ConversationMember[]
-  sentMessages Message[]
-  deliveries   MessageDelivery[]
+  username         String               @unique
+  passwordHash     String               @map("password_hash")
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  sessions         Session[]
+  resetTokens      PasswordResetToken[]
+  identityKey      IdentityKey?
+  oneTimeKeys      OneTimePrekey[]
+  memberships      ConversationMember[]
+  sentMessages     Message[]
+  deliveries       MessageDelivery[]
+  toDeviceSent     ToDeviceMessage[]    @relation("ToDeviceSent")
+  toDeviceReceived ToDeviceMessage[]    @relation("ToDeviceReceived")
 
   attachments Attachment[]
 
@@ -94,16 +96,20 @@ model OneTimePrekey {
 }
 
 model Conversation {
-  id        String               @id @default(uuid()) @db.Uuid
+  id                String               @id @default(uuid()) @db.Uuid
   /// "direct" now; "group" is a later extension (membership table is already N-ary).
-  kind      String               @default("direct")
+  kind              String               @default("direct")
   /// For direct chats: "<lowUserId>:<highUserId>" — makes create idempotent. NULL for groups.
-  directKey String?              @unique @map("direct_key")
+  directKey         String?              @unique @map("direct_key")
   /// Last allocated per-conversation message sequence number.
-  lastSeq   BigInt               @default(0) @map("last_seq")
-  createdAt DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
-  members   ConversationMember[]
-  messages  Message[]
+  lastSeq           BigInt               @default(0) @map("last_seq")
+  /// Groups: creator/admin (never removable) and membership version (bumped on every change).
+  adminId           String?              @map("admin_id") @db.Uuid
+  membershipVersion Int                  @default(0) @map("membership_version")
+  encryptedMeta     Bytes?               @map("encrypted_meta")
+  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  members           ConversationMember[]
+  messages          Message[]
 
   attachments Attachment[]
 
@@ -114,6 +120,8 @@ model ConversationMember {
   conversationId String       @map("conversation_id") @db.Uuid
   userId         String       @map("user_id") @db.Uuid
   joinedAt       DateTime     @default(now()) @map("joined_at") @db.Timestamptz(3)
+  /// Seq at join; member sees only messages with seq > joinedSeq.
+  joinedSeq      BigInt       @default(0) @map("joined_seq")
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -124,36 +132,38 @@ model ConversationMember {
 
 /// Opaque ciphertext envelope only — never plaintext.
 model Message {
-  id             String            @id @default(uuid()) @db.Uuid
-  conversationId String            @map("conversation_id") @db.Uuid
-  senderId       String            @map("sender_id") @db.Uuid
-  seq            BigInt
+  id              String              @id @default(uuid()) @db.Uuid
+  conversationId  String              @map("conversation_id") @db.Uuid
+  /// NULL for server system events (groups).
+  senderId        String?             @map("sender_id") @db.Uuid
+  seq             BigInt
   /// Client-generated id; (conversation, sender, client_msg_id) unique => idempotent retries.
-  clientMsgId    String            @map("client_msg_id")
-  ciphertext     Bytes
-  version        Int
-  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
-  conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender         User              @relation(fields: [senderId], references: [id], onDelete: Cascade)
-  deliveries     MessageDelivery[]
+  clientMsgId     String              @map("client_msg_id")
+  ciphertext      Bytes
+  version         Int
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  conversation    Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender          User?               @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  systemEvent     Json?               @map("system_event")
+  deliveries      MessageDelivery[]
   attachmentLinks MessageAttachment[]
 
   @@unique([conversationId, seq])
-  @@index([createdAt])
   @@unique([conversationId, senderId, clientMsgId])
+  @@index([createdAt])
   @@map("messages")
 }
 
 model MessageDelivery {
-  messageId   String    @map("message_id") @db.Uuid
-  recipientId String    @map("recipient_id") @db.Uuid
-  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(3)
+  messageId               String    @map("message_id") @db.Uuid
+  recipientId             String    @map("recipient_id") @db.Uuid
+  deliveredAt             DateTime? @map("delivered_at") @db.Timestamptz(3)
   /// SHA-256 of the recipient's identity public key at send time (NULL = legacy row).
-  recipientIdentityDigest Bytes? @map("recipient_identity_digest")
+  recipientIdentityDigest Bytes?    @map("recipient_identity_digest")
   /// 'undeliverable_device_changed' while awaiting the sender's re-encrypted resend.
-  undeliverableReason String? @map("undeliverable_reason")
-  message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  recipient   User      @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  undeliverableReason     String?   @map("undeliverable_reason")
+  message                 Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  recipient               User      @relation(fields: [recipientId], references: [id], onDelete: Cascade)
 
   @@id([messageId, recipientId])
   @@index([recipientId, deliveredAt])
@@ -175,16 +185,16 @@ model RateLimit {
 /// E2EE-47: opaque encrypted attachment blobs (bytes live in Neon Object Storage under key "a/<ref>").
 /// Never holds names, MIME types, keys or plaintext. CHECK status IN ('pending','stored') is in SQL.
 model Attachment {
-  ref            String       @id
-  ownerUserId    String       @map("owner_user_id") @db.Uuid
-  conversationId String       @map("conversation_id") @db.Uuid
-  sizeBytes      Int          @map("size_bytes")
+  ref            String              @id
+  ownerUserId    String              @map("owner_user_id") @db.Uuid
+  conversationId String              @map("conversation_id") @db.Uuid
+  sizeBytes      Int                 @map("size_bytes")
   sha256         String
-  status         String       @default("pending")
-  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
-  expiresAt      DateTime     @map("expires_at") @db.Timestamptz(3)
-  owner          User         @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  status         String              @default("pending")
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt      DateTime            @map("expires_at") @db.Timestamptz(3)
+  owner          User                @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  conversation   Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   messageLinks   MessageAttachment[]
 
   @@index([expiresAt])
@@ -202,4 +212,21 @@ model MessageAttachment {
   @@id([messageId, ref])
   @@index([ref])
   @@map("message_attachments")
+}
+
+/// Olm to-device envelopes (Megolm room keys), queued per recipient until acked or 30 days.
+model ToDeviceMessage {
+  id          String   @id @default(uuid()) @db.Uuid
+  senderId    String   @map("sender_id") @db.Uuid
+  recipientId String   @map("recipient_id") @db.Uuid
+  ciphertext  Bytes
+  type        Int
+  version     Int
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  sender      User     @relation("ToDeviceSent", fields: [senderId], references: [id], onDelete: Cascade)
+  recipient   User     @relation("ToDeviceReceived", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, createdAt], map: "to_device_messages_recipient_idx")
+  @@index([createdAt], map: "to_device_messages_created_at_idx")
+  @@map("to_device_messages")
 }

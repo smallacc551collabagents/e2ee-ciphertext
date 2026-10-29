@@ -8,6 +8,7 @@ import { me, requireAuth } from "../middleware/requireAuth.js";
 import { normalizeUsername } from "../services/auth.js";
 import { overLimit } from "../utils/rateLimiter.js";
 import { shared } from "../utils/sharedSchema.js";
+import { membersOf } from "../services/groups.js";
 import { deleteFullyAcked, RETENTION, sweepMessages } from "../services/retention.js";
 import {
   ackRequestSchema, CIPHERTEXT_MAX_BYTES, conversationParamsSchema, createConversationRequestSchema, KEY_MAX_BYTES,
@@ -36,14 +37,14 @@ const err = (reply: FastifyReply, code: number, error: string, message: string) 
 
 /** Thrown INSIDE tx callbacks so the transaction rolls back; mapped to HTTP outside the tx. */
 class ApiError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) { super(message); }
+  constructor(readonly status: number, readonly code: string, message: string, readonly extra: Record<string, unknown> = {}) { super(message); }
 }
 /** Run a transaction and translate ApiError into a clean JSON reply (after rollback). */
 async function txReply<T>(reply: FastifyReply, fn: (c: Queryable) => Promise<T>): Promise<T | FastifyReply> {
   try {
     return await tx(fn);
   } catch (e) {
-    if (e instanceof ApiError) return err(reply, e.status, e.code, e.message);
+    if (e instanceof ApiError) return reply.code(e.status).send({ error: e.code, message: e.message, ...e.extra });
     throw e;
   }
 }
@@ -66,11 +67,12 @@ async function isMember(c: Queryable, conversationId: string, userId: string): P
   return (r.rowCount ?? 0) > 0;
 }
 
-interface MsgRow { id: string; conversation_id: string; sender_id: string; seq: string; client_msg_id: string; ciphertext: Buffer; version: number; created_at: Date }
+interface MsgRow { system_event?: unknown; id: string; conversation_id: string; sender_id: string; seq: string; client_msg_id: string; ciphertext: Buffer; version: number; created_at: Date }
 const msgDto = (m: MsgRow) => ({
   id: m.id, conversationId: m.conversation_id, senderId: m.sender_id, seq: String(m.seq),
   clientMsgId: m.client_msg_id, ciphertext: enc(m.ciphertext), version: m.version,
   createdAt: new Date(m.created_at).toISOString(),
+  ...(m.system_event ? { kind: "system" as const, event: m.system_event, senderId: "" , ciphertext: "" } : {}),
 });
 
 export async function transportRoutes(app: FastifyInstance): Promise<void> {
@@ -117,7 +119,11 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
         if (oldIk && !Buffer.from(oldIk).equals(ik)) await c.query(
           `UPDATE message_deliveries SET undeliverable_reason = $3
             WHERE recipient_id = $1 AND delivered_at IS NULL
-              AND (recipient_identity_digest IS NULL OR recipient_identity_digest <> $2)`, [uid, digest(ik), UNDELIVERABLE]);
+              AND (recipient_identity_digest IS NULL OR recipient_identity_digest <> $2)
+              AND message_id NOT IN (SELECT id FROM messages WHERE system_event IS NOT NULL)`, [uid, digest(ik), UNDELIVERABLE]);
+        // Pending Olm to-device envelopes (room keys) for the old identity can never be decrypted: drop them;
+        // senders re-share after accepting the new identity.
+        if (oldIk && !Buffer.from(oldIk).equals(ik)) await c.query(`DELETE FROM to_device_messages WHERE recipient_id = $1`, [uid]);
       } else if (ik || spk) {
         if (ik && identityKey) throw new ApiError(400, "signed_prekey_required", "Replacing identityKey requires a new signedPrekey.");
         if (spk && sig && signedPrekey) await c.query(
@@ -218,20 +224,23 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/conversations", async (req) => {
-    const r = await q().query<{ id: string; kind: string; last_seq: string; created_at: Date; members: { id: string; username: string }[] }>(
-      `SELECT c.id, c.kind, c.last_seq, c.created_at,
-              json_agg(json_build_object('id', u.id, 'username', u.username) ORDER BY u.username) AS members
+    const r = await q().query<{ id: string; kind: string; last_seq: string; created_at: Date; admin_id: string | null; membership_version: number; encrypted_meta: Buffer | null; members: { id: string; username: string }[] }>(
+      `SELECT c.id, c.kind, c.last_seq, c.created_at, c.admin_id, c.membership_version, c.encrypted_meta,
+              json_agg(json_build_object('id', u.id, 'username', u.username, 'joinedAt', to_char(m.joined_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) ORDER BY u.username) AS members
          FROM conversation_members mine
          JOIN conversations c ON c.id = mine.conversation_id
          JOIN conversation_members m ON m.conversation_id = c.id
          JOIN users u ON u.id = m.user_id
         WHERE mine.user_id = $1
-        GROUP BY c.id ORDER BY c.created_at DESC LIMIT 200`, [me(req).id]);
-    return { conversations: r.rows.map((c) => ({ id: c.id, kind: c.kind, lastSeq: String(c.last_seq), createdAt: new Date(c.created_at).toISOString(), members: c.members })) };
+        GROUP BY c.id, c.kind, c.last_seq, c.created_at, c.admin_id, c.membership_version, c.encrypted_meta ORDER BY c.created_at DESC LIMIT 200`, [me(req).id]);
+    return { conversations: r.rows.map((c) => ({
+      id: c.id, kind: c.kind, lastSeq: String(c.last_seq), createdAt: new Date(c.created_at).toISOString(), members: c.members,
+      ...(c.kind === "group" ? { adminId: c.admin_id, membershipVersion: c.membership_version, encryptedMeta: enc(c.encrypted_meta) } : {}),
+    })) };
   });
 
   // ---------- messages ----------
-  app.post<{ Params: { id: string }; Body: { clientMsgId: string; ciphertext: string; version: number; attachmentRefs?: string[] } }>("/conversations/:id/messages", {
+  app.post<{ Params: { id: string }; Body: { clientMsgId: string; ciphertext: string; version: number; attachmentRefs?: string[]; membershipVersion?: number } }>("/conversations/:id/messages", {
     ...shared({ params: conversationParamsSchema, body: sendMessageRequestSchema }),
     config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 120, timeWindow: "1 minute", keyGenerator: (r) => `msg:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
@@ -242,7 +251,13 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
       `SELECT * FROM messages WHERE conversation_id = $1 AND sender_id = $2 AND client_msg_id = $3`, [req.params.id, uid, req.body.clientMsgId]);
     try {
       return await txReply(reply, async (c) => {
-      if (!(await isMember(c, req.params.id, uid))) throw new ApiError(404, "not_found", "Conversation not found.");
+      // Lock the conversation first: serializes against membership changes (groups) and seq allocation.
+      const conv = (await c.query<{ kind: string; membership_version: number }>(`SELECT kind, membership_version FROM conversations WHERE id = $1 FOR UPDATE`, [req.params.id])).rows[0];
+      if (!conv || !(await isMember(c, req.params.id, uid))) throw new ApiError(404, "not_found", "Conversation not found.");
+      if (conv.kind === "group" && req.body.membershipVersion !== conv.membership_version) {
+        throw new ApiError(409, "membership_changed", "Group membership changed; rotate the group session and resend.",
+          { membershipVersion: conv.membership_version, members: await membersOf(c, req.params.id) });
+      }
       const dup = await findDup(c);
       const d0 = dup.rows[0];
       if (d0) {
@@ -296,6 +311,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     const limit = Math.min(Math.max(Number(req.query.limit ?? LIMITS.pageSize), 1), LIMITS.pageSize);
     const r = await q().query<MsgRow & { delivered_at: Date | null }>(
       `SELECT m.* FROM messages m WHERE m.conversation_id = $1 AND m.seq > $2::bigint
+         AND m.seq > (SELECT joined_seq FROM conversation_members WHERE conversation_id = $1 AND user_id = $4)
          AND NOT EXISTS (SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_id = $4 AND d.undeliverable_reason IS NOT NULL)
        ORDER BY m.seq LIMIT $3`, [req.params.id, req.query.after ?? "0", limit + 1, uid]);
     const page = r.rows.slice(0, limit).map(msgDto);
