@@ -489,8 +489,10 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       if (conv.kind === "group") {
         const others = conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username));
         try { note(await verifier.refreshStale(others)); } catch { /* offline */ }
-        const pend = new Set(groupPending.get(conversationId) ?? []);
-        for (const p of others) if (changed.has(p) || (await peers.get(p))?.pendingChange) pend.add(p);
+        // Only an unaccepted identity change blocks sending; members that merely had no reachable device (NO_DEVICE) stay
+        // in groupPending but can't be "verified", so they must not lock the composer behind the banner.
+        const pend = new Set<string>();
+        for (const p of new Set([...others, ...(groupPending.get(conversationId) ?? [])])) if (changed.has(p) || (await peers.get(p))?.pendingChange) pend.add(p);
         if (!pend.size) return { digits: null, changed: false };
         return { digits: null, changed: true, changeKind: await changeKind([...pend][0]!) };
       }
@@ -507,9 +509,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const conv = convos.get(conversationId);
       if (!conv) return;
       if (conv.kind === "group") {
-        for (const m of conv.members) {
-          if (m.id === me.id) continue;
-          const pid = c.userIdFor(m.username);
+        const ids = new Set([...conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username)), ...(groupPending.get(conversationId) ?? [])]);
+        for (const pid of ids) {
           const nid = changed.get(pid) ?? (await peers.get(pid))?.pendingChange;
           if (nid) { await verifier.acceptNewIdentity(nid); changed.delete(pid); }
         }
