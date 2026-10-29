@@ -287,6 +287,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const thread = threads.get(gid) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
     threads.set(gid, thread);
     const add = (seq: string, view: MessageView) => { if (!thread.entries.has(view.id) || thread.entries.get(view.id)!.view.status === "failed") thread.entries.set(view.id, { seq: BigInt(seq), view }); };
+    const hidden = new Set<string>(); // decrypted in-group meta messages: known, not rendered
     const nameOf = (cryptoUserId: string) => { for (const u of usernameById.values()) if (c.userIdFor(u) === cryptoUserId) return u; return undefined; };
     const fromText = (id: string, seq: string, senderUserId: string, text: string, sentAt: string, clientMsgId?: string) => {
       if (text.startsWith(SYSTEM_PREFIX)) {
@@ -295,7 +296,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
         return;
       }
       const meta = decodeGroupMeta(text);
-      if (meta) { localStorage.setItem(nameKey(gid), meta.name); return; }
+      if (meta) { localStorage.setItem(nameKey(gid), meta.name); hidden.add(id); return; }
       const fromMe = senderUserId === myUserId;
       add(seq, { id, ...(clientMsgId ? { clientId: clientMsgId } : {}), fromMe, ...plaintextView(text, c.toDisplayText), sentAt, status: fromMe ? "sent" : "delivered", ...(fromMe ? {} : { senderName: nameOf(senderUserId) }) });
     };
@@ -312,7 +313,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const known = new Set([...thread.entries.entries()].filter(([, e]) => e.view.status !== "failed").map(([id]) => id));
     const pending: MessageWire[] = [];
     for (const m of wire) {
-      if (known.has(m.id)) continue;
+      if (known.has(m.id) || hidden.has(m.id)) continue;
       if (m.kind !== "system" && m.senderId === me.id) { add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" }); continue; }
       pending.push(m);
     }

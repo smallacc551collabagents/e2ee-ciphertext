@@ -88,7 +88,11 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   const loadMsgs = useCallback((id: string) => {
     setMsgs({ state: "loading" });
     adapter.listMessages(id).then((data) => setMsgs({ state: "ready", data }), (e) => { if (e instanceof NewDeviceRequiredError) setDevice("confirm"); setMsgs(toLoad(e)); })
-      .finally(() => { void adapter.safety?.(id).then(setSafety, () => setSafety(null)); });
+      .finally(() => {
+        void adapter.safety?.(id).then(setSafety, () => setSafety(null));
+        // Group names arrive end-to-end encrypted inside the group; refresh the sidebar once decrypted.
+        if (adapter.groupInfo) adapter.listConversations().then((data) => setConvos({ state: "ready", data }), () => undefined);
+      });
   }, [adapter]);
   useEffect(() => { setSafety(null); setShowInfo(false); }, [activeId]);
   const refreshConvos = useCallback(() => {
