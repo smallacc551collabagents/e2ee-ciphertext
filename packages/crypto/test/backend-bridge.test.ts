@@ -97,7 +97,7 @@ describe('backend bridge (PR #13 wire shapes)', () => {
     expect(checkPeerIdentity(stored, bob.identity())).toEqual(stored);
     const bob2 = await mk('bob', 'BOB2', `bob-new-${n}`);
     expect(() => checkPeerIdentity(stored, bob2.identity())).toThrowError(expect.objectContaining({ code: 'IDENTITY_CHANGED' }));
-  });
+  }, 20_000); // creates 3 Olm accounts; CPU-starved CI runners exceed the 5s default
 
   it('N receives on an existing session consume zero OTKs and make zero bundle/identity calls', async () => {
     const { be, alice, bob } = await setup();

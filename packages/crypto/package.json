@@ -16,7 +16,8 @@
   },
   "devDependencies": {
     "fake-indexeddb": "^6",
-    "vitest": "^2"
+    "vitest": "^2",
+    "@e2ee/shared": "workspace:*"
   },
   "exports": {
     ".": {

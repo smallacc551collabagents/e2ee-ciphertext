@@ -18,6 +18,8 @@ export interface MessageView {
   status: MessageStatus;
   /** Untrusted attachment descriptor from inside the decrypted message (re-validated on open). */
   attachment?: unknown;
+  /** Own message the server could not deliver: the recipient replaced its device. Re-sent automatically after acceptNewIdentity. */
+  undeliverable?: "recipient-changed-device";
 }
 
 /** Thrown by adapters whose backend/crypto contract isn't available yet. */
@@ -58,7 +60,12 @@ export interface ChatAdapter {
   displayText?(s: string): string;
   /** Optional: safety number + identity-changed state (live adapter only). */
   safety?(conversationId: string): Promise<SafetyInfo>;
+  /** Accepts the peer's new safety number, then automatically re-sends messages stranded on their old device. */
   acceptNewIdentity?(conversationId: string): Promise<void>;
+  /** Own messages flagged undeliverable_device_changed (recipient changed device), in seq order. */
+  pendingResends?(conversationId: string): Promise<{ clientId: string; messageId: string; hasText: boolean }[]>;
+  /** Re-encrypt + re-send flagged messages (same clientId). Refuses (failed[]) until acceptNewIdentity. */
+  resendPending?(conversationId: string): Promise<{ resent: string[]; missing: string[]; failed: string[] }>;
   /** E2EE-79: check before rendering chat. Does not publish anything. */
   deviceState?(): Promise<DeviceState>;
   /** E2EE-79: user confirmed "use this browser as my new device" -> publish the new identity. */

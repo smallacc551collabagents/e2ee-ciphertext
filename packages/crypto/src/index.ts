@@ -12,3 +12,4 @@ export * from './revocation.js';
 export * from './groups.js';
 export * from './device-state.js';
 export * from './session.js';
+export * from './resend.js';
