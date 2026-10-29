@@ -10,6 +10,7 @@
  * Plaintext never appears in IndexedDB keys or values; only conversationId and seq
  * (both already visible to the server) are stored in clear for indexing.
  */
+import { trackOpen } from './session.js';
 import { CryptoError } from './contract.js';
 
 export interface HistoryMessage {
@@ -99,6 +100,7 @@ export async function openHistoryStore(storeName: string): Promise<HistoryStore>
     throw new CryptoError('STORAGE_FAILED', 'Could not open the history store', { cause: e });
   }
   let closed = false;
+  const untrack = trackOpen(storeName, () => { if (!closed) { closed = true; db.close(); } });
   const guard = () => { if (closed) throw new CryptoError('NOT_INITIALIZED', 'History store is closed'); };
 
   return {
@@ -141,7 +143,7 @@ export async function openHistoryStore(storeName: string): Promise<HistoryStore>
       tx.objectStore(MSGS).clear();
       await done(tx);
     },
-    close() { closed = true; db.close(); },
+    close() { if (!closed) { closed = true; untrack(); db.close(); } },
   };
 }
 

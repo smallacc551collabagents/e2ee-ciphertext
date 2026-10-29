@@ -5,6 +5,7 @@
  * encryption) is performed by the library; this file only wires transport,
  * locking and typed errors.
  */
+import { trackOpen } from './session.js';
 import * as M from '@matrix-org/matrix-sdk-crypto-wasm';
 import {
   CryptoError,
@@ -83,6 +84,8 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     }
   });
   let closed = false;
+  let api: { close(): void } | null = null;
+  const untrack = trackOpen(opts.storeName, () => api?.close());
   // Signal an empty fallback-key set once so the library creates a signed
   // fallback key: the backend requires it as the signed prekey on first publish.
   await withLock(lockName, () => machine.receiveSyncChanges('[]', new M.DeviceLists(), new Map(), new Set()));
@@ -118,7 +121,7 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     }
   }
 
-  return {
+  const adapter: CryptoAdapter = {
     identity: () => ident,
 
     sync: () =>
@@ -263,8 +266,11 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<CryptoA
     close: () => {
       if (!closed) {
         closed = true;
+        untrack();
         machine.close();
       }
     },
   };
+  api = adapter;
+  return adapter;
 }
