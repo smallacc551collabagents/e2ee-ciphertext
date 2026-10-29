@@ -9,6 +9,7 @@ import { idbKv } from "./idb";
 import type { HistoryStore } from "./history";
 import { AttachmentError, browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
 import { closeLocalE2EE, onWipe, storeNameFor } from "./wipe";
+import { endSession, onSessionEnd } from "@/lib/session-guard";
 import { systemLine } from "../groupCopy";
 import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type GroupInfo, type MessageView, type SafetyInfo } from "./types";
 import { messageSchema, systemEventSchema, toDeviceListSchema, undeliverableListSchema, type ConversationWire, type MessageWire, type SystemEventWire } from "@e2ee/shared";
@@ -41,6 +42,7 @@ const http: BackendHttp = {
     });
     const json: unknown = await res.json().catch(() => null);
     if (res.status === 401) {
+      endSession(); // stop poll/resender/adapter before closing stores
       // Session expired: close stores; keys stay so re-login resumes this device.
       await closeLocalE2EE().catch(() => undefined);
       await fetch("/session/expired", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
@@ -224,7 +226,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       gcCtx = ctx;
       const state = await c.openGroupStateStore(`${storeNameFor(me.id)}-groups`);
       onWipe(() => state.close());
-      gcInst = c.createGroupCrypto({ adapter, state, backend: c.createHttpGroupBackend(http), history: texts, peers, senderUsername: (id) => usernameById.get(id) });
+      gcInst = c.createGroupCrypto({ adapter, state, backend: c.createHttpGroupBackend(http), history: texts, peers, senderUsername: (id) => usernameById.get(id), ownerUserId: c.userIdFor(me.username), storeName: storeNameFor(me.id) });
     }
     return gcInst;
   }
@@ -272,7 +274,13 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     note(await verifier.refreshStale([...convos.values()].filter((v) => v.kind !== "group").map((v) => c.userIdFor(peerOf(v).username))));
   }
 
+  // Logout/expiry: drop this account's context, group crypto and resender so nothing queued can run under the next cookie.
+  let disposed = false;
+  onSessionEnd(() => { disposed = true; ctx = null; gcInst = null; gcCtx = null; resenderInst = null; ctxForResender = null; inflight.clear(); });
+  const resentOnce = new Set<string>(); // clientMsgIds already re-sent by this tab: never re-send twice
+
   async function sendPlain(conversationId: string, text: string, clientId: string, attachmentRefs?: string[]): Promise<MessageView> {
+    if (disposed) throw new Error("session ended");
       const { c, adapter, texts } = await init();
       const conv = convos.get(conversationId);
       if (!conv) throw new Error("unknown conversation");
@@ -413,7 +421,12 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       resenderInst = cryptoMod!.createResender({
         parse: (r) => undeliverableListSchema.parse(r),
         http, history: { list: async (cid, after, limit) => (await init()).texts.list(cid, after, limit) }, selfUserId: cryptoMod!.userIdFor(me.username),
-        send: async (cid, text, clientMsgId) => { await sendPlain(cid, text, clientMsgId); },
+        send: async (cid, text, clientMsgId) => {
+          // Re-send keeps the original clientMsgId and only once per tab; a delivered copy is never re-posted.
+          if (resentOnce.has(clientMsgId)) return;
+          await sendPlain(cid, text, clientMsgId);
+          resentOnce.add(clientMsgId);
+        },
       });
     }
     return resenderInst;

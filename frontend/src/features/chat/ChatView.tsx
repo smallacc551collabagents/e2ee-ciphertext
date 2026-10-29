@@ -1,5 +1,5 @@
 "use client";
-import { bindTab } from "@/lib/session-guard";
+import { onSessionEnd, bindTab } from "@/lib/session-guard";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
@@ -118,10 +118,11 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
       } catch { /* keep current view; next tick retries */ } finally { busy = false; }
     };
     const t = setInterval(() => void poll(), 4000);
+    const off = onSessionEnd(() => clearInterval(t)); // logout stops polling before stores close
     window.addEventListener("focus", poll);
     window.addEventListener("online", poll);
     document.addEventListener("visibilitychange", poll);
-    return () => { clearInterval(t); window.removeEventListener("focus", poll); window.removeEventListener("online", poll); document.removeEventListener("visibilitychange", poll); };
+    return () => { off(); clearInterval(t); window.removeEventListener("focus", poll); window.removeEventListener("online", poll); document.removeEventListener("visibilitychange", poll); };
   }, [activeId, adapter]);
 
   async function acceptIdentity() {

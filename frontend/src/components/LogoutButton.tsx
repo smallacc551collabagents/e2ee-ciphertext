@@ -1,5 +1,5 @@
 "use client";
-import { setActiveUser, hardReset } from "@/lib/session-guard";
+import { setActiveUser, hardReset, endSession } from "@/lib/session-guard";
 import { useState } from "react";
 import { signout } from "@/lib/api/client";
 import { closeLocalE2EE, wipeLocalE2EE } from "@/features/chat/data/wipe";
@@ -10,6 +10,7 @@ export function LogoutButton({ className = "", removeData = false }: { className
     <button type="button" disabled={pending} className={className}
       onClick={async () => {
         setPending(true);
+        endSession(); // stop the 4s poll, resender and adapter context before anything closes
         setActiveUser(""); // stop every tab of this account from sending with the next account's cookie
         await signout().catch(() => undefined); // backend clears e2ee_session via the first-party proxy
         // Belt and braces: same-origin POST that deletes the cookie locally (never a GET).

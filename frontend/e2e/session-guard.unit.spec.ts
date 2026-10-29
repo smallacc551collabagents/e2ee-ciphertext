@@ -30,3 +30,11 @@ test("storage event from another tab triggers a hard reset", async () => {
   listeners.forEach((f) => f({ key: "e2ee.activeUser", newValue: "user-y" }));
   expect(replaced).toEqual(["/login"]);
 });
+test("endSession runs stoppers (poll, resender, adapter) and refuses every later /api call", async () => {
+  const g = await import("../src/lib/session-guard");
+  g.bindTab("user-x"); const order: string[] = [];
+  g.onSessionEnd(() => order.push("poll")); g.onSessionEnd(() => order.push("adapter"));
+  g.endSession(); order.push("closeLocalE2EE");
+  expect(order).toEqual(["poll", "adapter", "closeLocalE2EE"]);
+  expect(() => g.assertSameAccount()).toThrow(g.SessionChangedError); // even though the bound user still matches
+});
