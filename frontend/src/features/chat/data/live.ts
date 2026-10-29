@@ -202,6 +202,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   const toView = (v: ConversationWire): ConversationView => v.kind === "group"
     ? { id: v.id, kind: "group", name: groupName(v), preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }
     : { id: v.id, kind: "direct", name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 };
+  const identityCheckedAt = new Map<string, number>(); // groupId -> last member identity re-check
   const inflight = new Set<string>(); // clientMsgIds this tab is sending right now
   const groupPending = new Map<string, string[]>(); // groupId -> member userIds (crypto ids) whose safety number is unaccepted
   let gcInst: import("@e2ee/crypto").GroupCrypto | null = null;
@@ -532,7 +533,11 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       if (conv.kind === "group") {
         // Crypto hook: re-check every member's identity (new device -> pendingChange); only real changes block sending.
         // On open/poll: re-fetch each member's published identity so a new device is flagged now, not at first send.
-        for (const m of conv.members) if (m.id !== me.id) { try { note([await verifier.refresh(c.userIdFor(m.username))]); } catch { /* offline */ } }
+        // Throttled per group: safety() also runs after every send, and /keys/identity is rate-limited (429 broke sends).
+        if (Date.now() - (identityCheckedAt.get(conversationId) ?? 0) > 60_000) {
+          identityCheckedAt.set(conversationId, Date.now());
+          for (const m of conv.members) if (m.id !== me.id) { try { note([await verifier.refresh(c.userIdFor(m.username))]); } catch { /* offline / 429 */ } }
+        }
         let ids: { userId: string }[];
         try { const r = await (await gc()).refreshMembers(conversationId); groupPending.set(conversationId, r.pending); ids = r.identities; }
         catch { ids = await (await gc()).getPendingIdentities(conversationId).catch(() => []); }
