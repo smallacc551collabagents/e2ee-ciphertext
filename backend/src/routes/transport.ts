@@ -184,7 +184,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   // on every receive; per-caller limit only (no per-target drain limit — there is nothing to drain).
   app.get<{ Params: { username: string } }>("/keys/identity/:username", {
     ...shared({ params: usernameParamsSchema }),
-    config: { rateLimit: { hook: "preHandler", max: 60, timeWindow: "1 minute", keyGenerator: (r) => `identity:${r.user?.id ?? r.ip}` } },
+    config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 300, timeWindow: "1 minute", keyGenerator: (r) => `identity:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
     const r = await q().query<{ user_id: string; username: string; identity_key: Buffer; identity_key_version: number; signed_prekey_id: number; signed_prekey: Buffer; signed_prekey_signature: Buffer; signed_prekey_version: number }>(
       `SELECT k.*, u.username FROM identity_keys k JOIN users u ON u.id = k.user_id WHERE u.username = $1`, [normalizeUsername(req.params.username)]);
