@@ -1,6 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as auth from "../services/auth.js";
 import { clientIp } from "../utils/clientIp.js";
+import { tx } from "../database/db.js";
+import { objectStore } from "../services/objectStore.js";
+import { shared } from "../utils/sharedSchema.js";
+import { deleteAccountRequestSchema } from "@e2ee/shared";
 import { recordFailure, recordSuccess, usernameLocked } from "../utils/usernameLimiter.js";
 
 import { SESSION_COOKIE } from "../middleware/requireAuth.js";
@@ -110,6 +114,27 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post("/signout", async (req, reply) => {
     const t = tokenFrom(req);
     if (t) await auth.deleteSession(t);
+    clearSession(reply);
+    return reply.code(204).send();
+  });
+
+  // E2EE-72: delete my account. Requires the current password. Fail-CLOSED per-IP limit like signin.
+  app.delete<{ Body: { password: string } }>("/me", {
+    ...shared({ body: deleteAccountRequestSchema }),
+    config: { rateLimit: { ...ipLimit.rateLimit, max: 10, keyGenerator: (req: FastifyRequest) => `acct-del:${clientIp(req)}` } },
+  }, async (req, reply) => {
+    const t = tokenFrom(req);
+    const user = t ? await auth.userForSession(t) : null;
+    if (!user) return reply.code(401).send({ error: "unauthenticated", message: "Not signed in." });
+    const row = await auth.findUserForLogin(user.username);
+    if (!row || !(await auth.verifyPassword(row.password_hash, req.body.password)))
+      return reply.code(401).send({ error: "invalid_credentials", message: "Password is incorrect." });
+    const refs = await tx((c) => auth.deleteAccount(c, user.id));
+    // Blobs: best-effort after commit; rows are already gone so nothing can reference them.
+    for (const ref of refs) {
+      try { await objectStore().delete(`a/${ref}`); }
+      catch (e) { req.log.error({ err: { name: (e as Error)?.name } }, "account delete: blob delete failed"); }
+    }
     clearSession(reply);
     return reply.code(204).send();
   });

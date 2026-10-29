@@ -48,3 +48,22 @@ Rate limits are held in the shared Postgres store, so they survive cold starts (
 ## Encrypted attachments (E2EE-47)
 Blob upload/download endpoints, size cap, storage choice and presigned flow: see
 [attachments-backend.md](attachments-backend.md).
+
+## Message retention
+
+The server is a relay, not an archive. Ciphertext is deleted as soon as **every recipient has acked** it
+(`POST /messages/ack` deletes fully-acked messages immediately), and undelivered messages are dropped
+**30 days** after send. A bounded sweep (`sweepMessages()`, 500 rows per pass) runs on ~5% of send/ack calls.
+Indexes: `messages(created_at)`, partial `message_deliveries(message_id) WHERE delivered_at IS NULL`.
+Clients must keep their own decrypted history: `GET /conversations/:id/messages` only returns what is still queued.
+
+## Account delete (E2EE-72)
+
+`DELETE /auth/me` with JSON body `{ "password": "<current password>" }` (strict; cookie session required).
+- `204` (session cookie cleared): one transaction deletes the user's sessions, reset tokens, identity key /
+  signed prekey / one-time prekeys, messages they sent and deliveries queued to them, their conversation
+  memberships, conversations left with no members, and their attachments (plus all attachments of removed
+  conversations). Blobs are deleted from object storage after commit, best-effort with error logging.
+- `401 unauthenticated` (no/expired session) · `401 invalid_credentials` (wrong password) ·
+  `400 validation_error` (missing/extra fields) · `429 rate_limited` (10 per 15 min per IP, fail-closed).
+- The other member of a direct chat keeps the conversation; the deleted user disappears from `members`.

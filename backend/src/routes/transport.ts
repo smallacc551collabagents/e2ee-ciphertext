@@ -7,6 +7,7 @@ import { me, requireAuth } from "../middleware/requireAuth.js";
 import { normalizeUsername } from "../services/auth.js";
 import { overLimit } from "../utils/rateLimiter.js";
 import { shared } from "../utils/sharedSchema.js";
+import { deleteFullyAcked, RETENTION, sweepMessages } from "../services/retention.js";
 import {
   ackRequestSchema, CIPHERTEXT_MAX_BYTES, conversationParamsSchema, createConversationRequestSchema, KEY_MAX_BYTES,
   messagePageQuerySchema, publishKeysRequestSchema, sendMessageRequestSchema, usernameParamsSchema,
@@ -72,6 +73,11 @@ const msgDto = (m: MsgRow) => ({
 export async function transportRoutes(app: FastifyInstance): Promise<void> {
   // onRequest (not preHandler) so unauthenticated callers get 401 before body validation.
   app.addHook("onRequest", requireAuth);
+
+  const maybeSweep = async () => {
+    if (Math.random() >= RETENTION.probability) return;
+    try { await sweepMessages(); } catch (e) { app.log.error({ err: { name: (e as Error)?.name } }, "message sweep failed"); }
+  };
 
   // ---------- keys ----------
   app.post<{ Body: PublishBody }>("/keys/publish", {
@@ -215,7 +221,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---------- messages ----------
-  app.post<{ Params: { id: string }; Body: { clientMsgId: string; ciphertext: string; version: number } }>("/conversations/:id/messages", {
+  app.post<{ Params: { id: string }; Body: { clientMsgId: string; ciphertext: string; version: number; attachmentRefs?: string[] } }>("/conversations/:id/messages", {
     ...shared({ params: conversationParamsSchema, body: sendMessageRequestSchema }),
     config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 120, timeWindow: "1 minute", keyGenerator: (r) => `msg:${r.user?.id ?? r.ip}` } },
   }, async (req, reply) => {
@@ -236,11 +242,20 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
          VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6) RETURNING *`,
         [req.params.id, uid, s.rows[0]?.last_seq, req.body.clientMsgId, blob, req.body.version]);
       const row = m.rows[0] as MsgRow;
+      const refs = req.body.attachmentRefs ?? [];
+      if (refs.length) {
+        // Only refs the sender completed in THIS conversation (no pinning others' blobs).
+        const ok = await c.query(
+          `SELECT ref FROM attachments WHERE ref = ANY($1::text[]) AND owner_user_id = $2 AND conversation_id = $3 AND status = 'stored'`,
+          [refs, uid, req.params.id]);
+        if ((ok.rowCount ?? 0) !== refs.length) throw new ApiError(400, "invalid_attachment_refs", "attachmentRefs must be stored attachments you uploaded to this conversation.");
+        await c.query(`INSERT INTO message_attachments (message_id, ref) SELECT $1, unnest($2::text[])`, [row.id, refs]);
+      }
       await c.query(
         `INSERT INTO message_deliveries (message_id, recipient_id) SELECT $1, user_id FROM conversation_members WHERE conversation_id = $2 AND user_id <> $3`,
         [row.id, req.params.id, uid]);
       return reply.code(201).send({ message: msgDto(row), duplicate: false });
-      });
+      }).finally(maybeSweep);
     } catch (e) {
       // Concurrent retry with the same clientMsgId lost the race: tx rolled back
       // (incl. seq bump); return the winner's row exactly like a sequential retry.
@@ -270,6 +285,9 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     const r = await q().query(
       `UPDATE message_deliveries SET delivered_at = now() WHERE recipient_id = $1 AND message_id = ANY($2::uuid[]) AND delivered_at IS NULL`,
       [me(req).id, req.body.messageIds]);
+    // Retention: drop ciphertext as soon as every recipient has acked it.
+    try { await deleteFullyAcked(req.body.messageIds); } catch (e) { app.log.error({ err: { name: (e as Error)?.name } }, "ack retention delete failed"); }
+    await maybeSweep();
     return { acked: r.rowCount ?? 0 };
   });
 }

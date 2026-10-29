@@ -25,7 +25,7 @@ export const ATTACHMENT_TIMING = {
   uploadUrlSec: 5 * 60,      // presigned POST lifetime
   pendingTtlSec: 15 * 60,    // pending (never completed) uploads are reaped after this
   downloadUrlSec: 5 * 60,    // presigned GET lifetime
-  storedTtlSec: 30 * 24 * 3600, // stored blobs are reaped after 30 days
+  storedTtlSec: 30 * 24 * 3600, // sliding: completion and every download-url push expiry to now+30d
 };
 const GC_PROBABILITY = 0.05;
 const GC_BATCH = 50;
@@ -39,14 +39,23 @@ const err = (reply: FastifyReply, code: number, error: string, message: string) 
 
 interface AttRow { ref: string; owner_user_id: string; conversation_id: string; size_bytes: number; sha256: string; status: string; expired: boolean }
 
-/** Expiry sweep: deletes objects + rows whose window lapsed (pending never completed, or stored past TTL). Bounded per call. */
+/** SQL predicate: some still-undelivered message declared this ref (attachmentRefs on send). */
+const REFERENCED = `EXISTS (SELECT 1 FROM message_attachments ma JOIN message_deliveries d ON d.message_id = ma.message_id AND d.delivered_at IS NULL WHERE ma.ref = a.ref)`;
+
+/**
+ * Retention sweep. A row (and its blob) is deleted only when BOTH hold:
+ *  (1) its sliding expiry lapsed (pending: 15 min; stored: 30 days since completion / last download-url), and
+ *  (2) no undelivered message references it.
+ * Bounded per call. Blob delete is idempotent; the row is deleted after re-checking the predicate.
+ */
 export async function sweepAttachments(limit = GC_BATCH): Promise<number> {
   const r = await q().query<{ ref: string }>(
-    `SELECT ref FROM attachments WHERE expires_at < now() ORDER BY expires_at LIMIT $1`, [limit]);
+    `SELECT a.ref FROM attachments a WHERE a.expires_at < now() AND NOT ${REFERENCED} ORDER BY a.expires_at LIMIT $1`, [limit]);
   let n = 0;
   for (const { ref } of r.rows) {
+    const d = await q().query(`DELETE FROM attachments a WHERE a.ref = $1 AND a.expires_at < now() AND NOT ${REFERENCED}`, [ref]);
+    if (!d.rowCount) continue; // got referenced/extended meanwhile
     await objectStore().delete(objectKey(ref)); // idempotent; missing objects are fine
-    await q().query(`DELETE FROM attachments WHERE ref = $1 AND expires_at < now()`, [ref]);
     n++;
   }
   return n;
@@ -122,9 +131,13 @@ export async function attachmentRoutes(app: FastifyInstance): Promise<void> {
   }, async (req, reply) => {
     // Members of the conversation the blob was uploaded into only. Non-members, unknown refs,
     // pending and expired blobs all get the same 404 (no existence oracle).
+    // Retained = not expired OR still referenced by an undelivered message. A successful issuance
+    // slides expiry to now+30d (never shortens it).
     const r = await q().query(
-      `SELECT 1 FROM attachments a JOIN conversation_members m ON m.conversation_id = a.conversation_id AND m.user_id = $2
-       WHERE a.ref = $1 AND a.status = 'stored' AND a.expires_at > now()`, [req.params.ref, me(req).id]);
+      `UPDATE attachments a SET expires_at = GREATEST(a.expires_at, now() + make_interval(secs => $3))
+        WHERE a.ref = $1 AND a.status = 'stored' AND (a.expires_at > now() OR ${REFERENCED})
+          AND EXISTS (SELECT 1 FROM conversation_members m WHERE m.conversation_id = a.conversation_id AND m.user_id = $2)
+        RETURNING a.ref`, [req.params.ref, me(req).id, ATTACHMENT_TIMING.storedTtlSec]);
     if (!r.rowCount) return err(reply, 404, "not_found", "Attachment not found.");
     const downloadUrl = await objectStore().presignGet(objectKey(req.params.ref), ATTACHMENT_TIMING.downloadUrlSec);
     return reply.send({ downloadUrl, expiresAt: new Date(Date.now() + ATTACHMENT_TIMING.downloadUrlSec * 1000).toISOString() });
