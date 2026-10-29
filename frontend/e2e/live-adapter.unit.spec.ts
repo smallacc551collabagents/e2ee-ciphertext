@@ -125,3 +125,12 @@ test("keyedSerial: same-key tasks never overlap (no double-decrypt from load + p
   expect(max).toBe(1); expect(order).toEqual(["a", "b", "c"]); expect(r.map((x) => x.status)).toEqual(["fulfilled", "rejected", "fulfilled"]);
   active = 0; max = 0; await Promise.all([serial("x", task("x")), serial("y", task("y"))]); expect(max).toBe(2);
 });
+
+import { assertMayOpen } from "../src/features/chat/data/live";
+import { NewDeviceRequiredError } from "../src/features/chat/data/types";
+test("E2EE-79: a new browser for an account with server keys may not publish until confirmed", () => {
+  expect(() => assertMayOpen("needs-new-device-confirmation", false)).toThrow(NewDeviceRequiredError);
+  expect(() => assertMayOpen("needs-new-device-confirmation", true)).not.toThrow();
+  expect(() => assertMayOpen("fresh", false)).not.toThrow();
+  expect(() => assertMayOpen("existing", false)).not.toThrow();
+});
