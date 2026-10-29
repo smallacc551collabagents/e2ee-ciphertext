@@ -147,6 +147,9 @@ export function fromBundle(bundle: Bundle, expectedUserId: string) {
 }
 
 /** A KeyServerTransport that speaks the Phase 1 backend API. */
+/** Stop topping up one-time prekeys once the server holds this many unused. */
+export const OTK_POOL_TARGET = 100;
+
 export function createBackendTransport(http: BackendHttp): KeyServerTransport {
   // keys.query -> non-consuming GET /keys/identity; keys.claim -> GET /keys/bundle (consumes one OTK).
   async function fetchKeys(userId: string, consume: boolean) {
@@ -164,12 +167,23 @@ export function createBackendTransport(http: BackendHttp): KeyServerTransport {
     const b = JSON.parse(req.body) as Json;
     switch (req.kind) {
       case 'keys.upload': {
-        let count = 0;
+        // A reloaded OlmMachine re-generates OTKs on every page load; don't grow the server pool past
+        // OTK_POOL_TARGET (it 409s at 500 and that broke init). Skipped OTKs are simply never claimable.
+        const getCount = async () => ((await http.request('GET', '/keys/count')) as { oneTimePrekeyCount: number }).oneTimePrekeyCount;
+        let count = await getCount();
         for (const body of toPublishBodies(req.body, from.userId)) {
-          count = ((await http.request('POST', '/keys/publish', body)) as { oneTimePrekeyCount: number }).oneTimePrekeyCount;
-        }
-        if (!toPublishBodies(req.body, from.userId).length) {
-          count = ((await http.request('GET', '/keys/count')) as { oneTimePrekeyCount: number }).oneTimePrekeyCount;
+          const b2: Json = { ...body };
+          if (count >= OTK_POOL_TARGET) delete b2.oneTimePrekeys;
+          if (!Object.keys(b2).length) continue;
+          try {
+            count = ((await http.request('POST', '/keys/publish', b2)) as { oneTimePrekeyCount: number }).oneTimePrekeyCount;
+          } catch (e) {
+            const err = e as { status?: number; code?: string; body?: { error?: string } };
+            if (err.status !== 409) throw e;
+            delete b2.oneTimePrekeys;
+            if (Object.keys(b2).length) await http.request('POST', '/keys/publish', b2);
+            count = await getCount();
+          }
         }
         return JSON.stringify({ one_time_key_counts: { [ALGO]: count } });
       }
