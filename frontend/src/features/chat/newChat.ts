@@ -7,7 +7,7 @@ export { USERNAME_PATTERN };
 export function validatePeerUsername(raw: string, self: string): string | null {
   const u = raw.trim().replace(/^@/, "");
   if (!u) return "Enter a username.";
-  if (!USERNAME_PATTERN.test(u)) return "Usernames are 3–32 letters, numbers, dots or underscores.";
+  if (!USERNAME_PATTERN.test(u)) return "Usernames are 3–64 letters, numbers, dots or underscores.";
   if (u.toLowerCase() === self.toLowerCase()) return "You can’t start a chat with yourself.";
   return null;
 }

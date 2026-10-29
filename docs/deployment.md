@@ -57,7 +57,7 @@ Sessions are opaque 256-bit tokens; only SHA-256 digests are stored (`sessions.t
 | POST | /auth/signout | – | 204 | – |
 | GET | /auth/me | – | 200 `{user}` | 401 |
 
-Rules: username `^[a-zA-Z0-9_.]{3,32}$`, stored lowercase (case-insensitive unique); password 10–256 chars.
+Rules: username `^[a-zA-Z0-9_.]{3,64}$`, stored lowercase (case-insensitive unique); password 10–1024 chars (constants in `@e2ee/shared` `wire.ts`).
 Session TTL 30 days; reset token TTL 30 min, single use.
 
 Auth transport: httpOnly `e2ee_session` cookie (`Secure; SameSite=None`, because the frontend
