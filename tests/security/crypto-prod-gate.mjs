@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const PUBLIC_ENV_ALLOWLIST = new Set(['NEXT_PUBLIC_API_URL', 'NEXT_PUBLIC_WS_URL', 'NEXT_PUBLIC_CHAT_FIXTURES']);
+export const PUBLIC_ENV_ALLOWLIST = new Set(['NEXT_PUBLIC_API_URL', 'NEXT_PUBLIC_WS_URL', 'NEXT_PUBLIC_CHAT_FIXTURES', 'NEXT_PUBLIC_TEST_ACCOUNTS']);
 const SECRET_NAME = /SECRET|PASSWORD|PRIVATE|TOKEN|DATABASE_URL|(^|_)KEY($|_)/;
 const PLACEHOLDER = /^$|CHANGE|change[-_ ]?me|placeholder|example|localhost|127\.0\.0\.1|<.*>/i;
 

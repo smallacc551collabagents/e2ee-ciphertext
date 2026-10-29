@@ -59,6 +59,9 @@ jobs:
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
       - name: Build
         if: steps.guard.outputs.enabled == 'true'
+        env:
+          # Quick-login test account cards on /login and /signup. Set to "0" to turn them off.
+          NEXT_PUBLIC_TEST_ACCOUNTS: "1"
         run: vercel build --prod --token="$VERCEL_TOKEN"
       - name: Deploy
         if: steps.guard.outputs.enabled == 'true'
