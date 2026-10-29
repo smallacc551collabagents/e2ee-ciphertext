@@ -15,7 +15,7 @@ export function LogoutButton({ className = "", removeData = false }: { className
         // Belt and braces: same-origin POST that deletes the cookie locally (never a GET).
         await fetch("/session/expired", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
         if (removeData) await wipeLocalE2EE().catch(() => undefined); // explicit: delete keys, history, caches
-        else closeLocalE2EE(); // keep this device so re-login has no new-device screen
+        else await closeLocalE2EE().catch(() => undefined); // keep this device so re-login has no new-device screen
         router.replace("/login");
         router.refresh();
       }}>

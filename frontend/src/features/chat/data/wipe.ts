@@ -41,7 +41,10 @@ export async function wipeLocalE2EE(deleteState?: Deleter): Promise<void> {
 /** Normal sign-out / session expiry: close open stores but KEEP this browser's keys and history,
  *  so signing back in here resumes the same device (no new-device screen). Use wipeLocalE2EE only
  *  for account delete or an explicit "remove this browser's data". */
-export function closeLocalE2EE(): void {
+export async function closeLocalE2EE(): Promise<void> {
   closers.forEach((c) => { try { c(); } catch { /* ignore */ } });
   closers.clear();
+  // Also release the Olm machine for every account used in this tab (keys stay on disk).
+  const { closeCryptoSession } = await import("@e2ee/crypto").catch(() => ({ closeCryptoSession: undefined }));
+  closeCryptoSession?.();
 }
