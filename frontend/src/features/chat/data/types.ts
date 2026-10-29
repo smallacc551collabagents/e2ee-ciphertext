@@ -56,7 +56,7 @@ export class NewDeviceRequiredError extends Error {
 export type IdentityChangeKind = "new-device" | "key-changed";
 export interface PeerIdentityChange { peerId: string; username: string; kind: IdentityChangeKind }
 
-export interface SafetyInfo { digits: string[] | null; changed: boolean; changeKind?: IdentityChangeKind }
+export interface SafetyInfo { digits: string[] | null; changed: boolean; changeKind?: IdentityChangeKind; /** Groups: username of the member whose safety number changed. */ memberName?: string }
 
 export interface ChatAdapter {
   readonly id: string;

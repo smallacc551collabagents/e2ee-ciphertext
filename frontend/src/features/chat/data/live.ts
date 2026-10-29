@@ -212,7 +212,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       gcCtx = ctx;
       const state = await c.openGroupStateStore(`${storeNameFor(me.id)}-groups`);
       onWipe(() => state.close());
-      gcInst = c.createGroupCrypto({ adapter, state, backend: c.createHttpGroupBackend(http), history: texts, senderUsername: (id) => usernameById.get(id) });
+      gcInst = c.createGroupCrypto({ adapter, state, backend: c.createHttpGroupBackend(http), history: texts, peers, senderUsername: (id) => usernameById.get(id) });
     }
     return gcInst;
   }
@@ -315,7 +315,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   }
 
   async function listGroupMessagesNow(gid: string): Promise<MessageView[]> {
-    const { c, texts } = await init();
+    const { c, texts, verifier } = await init();
     const g = await gc();
     const myUserId = c.userIdFor(me.username);
     const thread = threads.get(gid) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
@@ -376,6 +376,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
           acks.push({ id: m.id, ok: true });
         } else {
           if (m.senderId === me.id) { add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" }); acks.push({ id: m.id, ok: true }); continue; }
+          const su = usernameById.get(m.senderId);
+          if (su) void verifier.refresh(c.userIdFor(su)).then((x) => note([x])).catch(() => undefined); // sender's device may have changed
           add(m.seq, { id: m.id, fromMe: false, text: r.code === "MISSING_ROOM_KEY" ? "Waiting for this message’s key from the sender…" : "Unable to decrypt this message", sentAt: m.createdAt, status: "failed", senderName: usernameById.get(m.senderId) });
           acks.push({ id: m.id, ok: false });
         }
@@ -528,14 +530,14 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const conv = convos.get(conversationId);
       if (!conv) return { digits: null, changed: false };
       if (conv.kind === "group") {
-        const others = conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username));
-        try { note(await verifier.refreshStale(others)); } catch { /* offline */ }
-        // Only an unaccepted identity change blocks sending; members that merely had no reachable device (NO_DEVICE) stay
-        // in groupPending but can't be "verified", so they must not lock the composer behind the banner.
-        const pend = new Set<string>();
-        for (const p of new Set([...others, ...(groupPending.get(conversationId) ?? [])])) if (changed.has(p) || (await peers.get(p))?.pendingChange) pend.add(p);
-        if (!pend.size) return { digits: null, changed: false };
-        return { digits: null, changed: true, changeKind: await changeKind([...pend][0]!) };
+        // Crypto hook: re-check every member's identity (new device -> pendingChange); only real changes block sending.
+        let ids: { userId: string }[];
+        try { const r = await (await gc()).refreshMembers(conversationId); groupPending.set(conversationId, r.pending); ids = r.identities; }
+        catch { ids = await (await gc()).getPendingIdentities(conversationId).catch(() => []); }
+        if (!ids.length) return { digits: null, changed: false };
+        const first = ids[0]!.userId;
+        const name = conv.members.find((m) => c.userIdFor(m.username) === first)?.username;
+        return { digits: null, changed: true, changeKind: await changeKind(first), ...(name ? { memberName: name } : {}) };
       }
       const peerId = c.userIdFor(peerOf(conv).username);
       // Re-check the peer's published identity on open, so a device change shows the banner before the first send fails.
@@ -550,14 +552,9 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const conv = convos.get(conversationId);
       if (!conv) return;
       if (conv.kind === "group") {
-        const acc: string[] = [];
-        const ids = new Set([...conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username)), ...(groupPending.get(conversationId) ?? [])]);
-        for (const pid of ids) {
-          const nid = changed.get(pid) ?? (await peers.get(pid))?.pendingChange;
-          if (nid) { await verifier.acceptNewIdentity(nid); changed.delete(pid); acc.push(pid); }
-        }
-        const r = await (await gc()).reshare(conversationId, acc).catch(() => null);
-        groupPending.set(conversationId, r?.pending ?? []);
+        // Explicit user click only: accept each changed member and let crypto push them the held/older keys.
+        const g = await gc();
+        for (const { userId } of await g.getPendingIdentities(conversationId)) { await g.acceptMemberIdentity(conversationId, userId); changed.delete(userId); }
         return;
       }
       const peerId = c.userIdFor(peerOf(conv).username);

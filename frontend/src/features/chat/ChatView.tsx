@@ -303,7 +303,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
             </header>
             {safety?.changed && (
               <div role="alert" data-testid="identity-changed" className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
-                <span data-kind={safety.changeKind ?? "unknown"}>{active.kind === "group" ? "A member’s safety number changed. They won’t get keys for new messages until you verify it." : identityWarning(active.name, safety.changeKind)}</span>
+                <span data-kind={safety.changeKind ?? "unknown"}>{active.kind === "group" ? `${safety.memberName ? `${safety.memberName}’s` : "A member’s"} safety number changed. Verify it before sending to this group.` : identityWarning(active.name, safety.changeKind)}</span>
                 <span className="flex gap-2">
                   <button type="button" onClick={() => setShowInfo(true)} className="underline">View safety number</button>
                   <button type="button" onClick={() => void acceptIdentity()} className="rounded-full bg-amber-600 px-3 py-1 text-white">I’ve verified it</button>
