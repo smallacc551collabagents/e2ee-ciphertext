@@ -170,11 +170,39 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
 
   const usernameById = new Map<string, string>();
   const remember = (v: ConversationWire) => { convos.set(v.id, v); for (const m of v.members) usernameById.set(m.id, m.username); };
-  const nameKey = (gid: string) => `e2ee.groupName.${me.id}.${gid}`;
-  const groupName = (v: ConversationWire) => localStorage.getItem(nameKey(v.id)) || v.members.filter((m) => m.id !== me.id).map((m) => m.username).join(", ") || "Group";
+  // Group names live only in the AES-GCM history store (pseudo-conversation per group), cached in memory.
+  const legacyNamePrefix = `e2ee.groupName.${me.id}.`;
+  const nameConv = (gid: string) => `__groupname__:${gid}`;
+  const names = new Map<string, string>();
+  async function saveName(gid: string, name: string) {
+    names.set(gid, name);
+    const { texts } = await init();
+    await texts.put(nameConv(gid), BigInt(Date.now()), { id: `name-${gid}`, senderUserId: "local", senderDeviceId: "local", text: name, sentAt: new Date().toISOString() }).catch(() => undefined);
+  }
+  let migrated = false;
+  onWipe(() => { names.clear(); for (const k of Object.keys(localStorage)) if (k.startsWith("e2ee.groupName.")) localStorage.removeItem(k); });
+  async function loadNames(groups: ConversationWire[]) {
+    const { texts } = await init();
+    if (!migrated) {
+      migrated = true;
+      for (const k of Object.keys(localStorage)) {
+        if (!k.startsWith("e2ee.groupName.")) continue;
+        const v = localStorage.getItem(k);
+        if (k.startsWith(legacyNamePrefix) && v) await saveName(k.slice(legacyNamePrefix.length), v);
+        localStorage.removeItem(k); // never keep plaintext names around
+      }
+    }
+    for (const g of groups) {
+      if (names.has(g.id)) continue;
+      const last = (await texts.list(nameConv(g.id), undefined, 100_000).catch(() => [])).at(-1);
+      if (last) names.set(g.id, last.text);
+    }
+  }
+  const groupName = (v: ConversationWire) => names.get(v.id) || v.members.filter((m) => m.id !== me.id).map((m) => m.username).join(", ") || "Group";
   const toView = (v: ConversationWire): ConversationView => v.kind === "group"
     ? { id: v.id, kind: "group", name: groupName(v), preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }
     : { id: v.id, kind: "direct", name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 };
+  const inflight = new Set<string>(); // clientMsgIds this tab is sending right now
   const groupPending = new Map<string, string[]>(); // groupId -> member userIds (crypto ids) whose safety number is unaccepted
   let gcInst: import("@e2ee/crypto").GroupCrypto | null = null;
   let gcCtx: unknown = null;
@@ -191,6 +219,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const seen = new Set(conversations.map((v) => v.id));
     for (const id of [...convos.keys()]) if (!seen.has(id)) convos.delete(id);
     conversations.forEach(remember);
+    await loadNames(conversations.filter((v) => v.kind === "group")).catch(() => undefined);
     return conversations;
   }
   /** Pull Olm to-device envelopes (Megolm room keys, key requests/responses), process, then ack. Returns groups to retry. */
@@ -214,7 +243,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const { c, texts } = await init();
     const pt = encodeGroupMeta(name);
     const clientId = crypto.randomUUID();
-    const r = await (await gc()).send(gid, pt, clientId);
+    inflight.add(clientId);
+    const r = await (await gc()).send(gid, pt, clientId).finally(() => setTimeout(() => inflight.delete(clientId), 5000));
     const m = messageSchema.safeParse((r.message as { message?: unknown })?.message);
     if (m.success) await texts.put(gid, m.data.seq, { id: m.data.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text: pt, sentAt: m.data.createdAt, clientMsgId: clientId }).catch(() => undefined);
     groupPending.set(gid, r.pending);
@@ -268,6 +298,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   async function sendGroup(gid: string, text: string, clientId: string): Promise<MessageView> {
     const { c, texts } = await init();
     let r;
+    inflight.add(clientId);
+    setTimeout(() => inflight.delete(clientId), 30_000);
     try { r = await (await gc()).send(gid, text, clientId); } catch (e) {
       if ((e as { status?: number }).status === 404 || (e as { status?: number }).status === 403) { convos.delete(gid); threads.delete(gid); await (await gc()).forget(gid).catch(() => undefined); }
       throw e;
@@ -296,7 +328,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
         return;
       }
       const meta = decodeGroupMeta(text);
-      if (meta) { localStorage.setItem(nameKey(gid), meta.name); hidden.add(id); return; }
+      if (meta) { if (names.get(gid) !== meta.name) void saveName(gid, meta.name); hidden.add(id); return; }
       const fromMe = senderUserId === myUserId;
       add(seq, { id, ...(clientMsgId ? { clientId: clientMsgId } : {}), fromMe, ...plaintextView(text, c.toDisplayText), sentAt, status: fromMe ? "sent" : "delivered", ...(fromMe ? {} : { senderName: nameOf(senderUserId) }) });
     };
@@ -314,7 +346,9 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const pending: MessageWire[] = [];
     for (const m of wire) {
       if (known.has(m.id) || hidden.has(m.id)) continue;
-      if (m.kind !== "system" && m.senderId === me.id) { add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" }); continue; }
+      // Own message not (yet) in local history: in flight from this tab -> skip; else decrypt it and only call it
+      // "another session" if the envelope's device isn't this one.
+      if (m.kind !== "system" && m.senderId === me.id && inflight.has(m.clientMsgId)) continue;
       pending.push(m);
     }
     if (pending.length) {
@@ -331,10 +365,15 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
             fromText(m.id, m.seq, "system", text, m.createdAt);
             acks.push({ id: m.id, ok });
           } else acks.push({ id: m.id, ok: true });
+        } else if (r.ok && m.senderId === me.id && r.sender.deviceId !== deviceIdFor(me.id)) {
+          add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" });
+          acks.push({ id: m.id, ok: true });
         } else if (r.ok) {
+          if (m.senderId === me.id) await texts.put(gid, m.seq, { id: m.id, senderUserId: r.sender.userId, senderDeviceId: r.sender.deviceId, text: r.plaintext, sentAt: m.createdAt, clientMsgId: m.clientMsgId }).catch(() => undefined);
           fromText(m.id, m.seq, r.sender.userId, r.plaintext, m.createdAt, m.clientMsgId);
           acks.push({ id: m.id, ok: true });
         } else {
+          if (m.senderId === me.id) { add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" }); acks.push({ id: m.id, ok: true }); continue; }
           add(m.seq, { id: m.id, fromMe: false, text: r.code === "MISSING_ROOM_KEY" ? "Waiting for this message’s key from the sender…" : "Unable to decrypt this message", sentAt: m.createdAt, status: "failed", senderName: usernameById.get(m.senderId) });
           acks.push({ id: m.id, ok: false });
         }
@@ -432,7 +471,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       await init();
       const { conversation: v } = await chatApi.createGroup(usernames.map((u) => u.trim().replace(/^@/, "")));
       remember(v);
-      localStorage.setItem(nameKey(v.id), name.trim().slice(0, 64));
+      await saveName(v.id, name.trim().slice(0, 64));
       await sendGroupMeta(v.id, name.trim()).catch(() => undefined); // shares the first Megolm key too
       return { ...toView(v), preview: "", lastActivityAt: v.createdAt ?? new Date().toISOString() };
     },
@@ -461,7 +500,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       await (await gc()).forget(gid).catch(() => undefined);
       convos.delete(gid);
       threads.delete(gid);
-      localStorage.removeItem(nameKey(gid));
+      names.delete(gid);
     },
     async contacts() {
       await refreshConvos();
@@ -489,8 +528,10 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       if (conv.kind === "group") {
         const others = conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username));
         try { note(await verifier.refreshStale(others)); } catch { /* offline */ }
-        const pend = new Set(groupPending.get(conversationId) ?? []);
-        for (const p of others) if (changed.has(p) || (await peers.get(p))?.pendingChange) pend.add(p);
+        // Only an unaccepted identity change blocks sending; members that merely had no reachable device (NO_DEVICE) stay
+        // in groupPending but can't be "verified", so they must not lock the composer behind the banner.
+        const pend = new Set<string>();
+        for (const p of new Set([...others, ...(groupPending.get(conversationId) ?? [])])) if (changed.has(p) || (await peers.get(p))?.pendingChange) pend.add(p);
         if (!pend.size) return { digits: null, changed: false };
         return { digits: null, changed: true, changeKind: await changeKind([...pend][0]!) };
       }
@@ -507,9 +548,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const conv = convos.get(conversationId);
       if (!conv) return;
       if (conv.kind === "group") {
-        for (const m of conv.members) {
-          if (m.id === me.id) continue;
-          const pid = c.userIdFor(m.username);
+        const ids = new Set([...conv.members.filter((m) => m.id !== me.id).map((m) => c.userIdFor(m.username)), ...(groupPending.get(conversationId) ?? [])]);
+        for (const pid of ids) {
           const nid = changed.get(pid) ?? (await peers.get(pid))?.pendingChange;
           if (nid) { await verifier.acceptNewIdentity(nid); changed.delete(pid); }
         }
