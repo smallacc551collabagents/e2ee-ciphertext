@@ -54,7 +54,11 @@ export default async function SettingsPage() {
         <section id="notifications" className="rounded-2xl bg-white p-5 ring-1 ring-slate-200"><div className="flex items-center justify-between"><h2 className="font-semibold">Notifications</h2><Soon /></div></section>
         <section id="appearance" className="rounded-2xl bg-white p-5 ring-1 ring-slate-200"><div className="flex items-center justify-between"><h2 className="font-semibold">Appearance</h2><Soon /></div></section>
         <p className="rounded-2xl bg-blue-50 p-4 text-sm text-blue-800">Verify safety numbers with your contacts to make sure nobody is intercepting your messages.</p>
-        <LogoutButton className="rounded-lg bg-red-600 px-4 py-2 text-white hover:bg-red-700" />
+        <div className="flex flex-wrap gap-3">
+          <LogoutButton className="rounded-lg bg-slate-800 px-4 py-2 text-white hover:bg-slate-900" />
+          <LogoutButton removeData className="rounded-lg bg-red-600 px-4 py-2 text-white hover:bg-red-700" />
+        </div>
+        <p className="-mt-3 text-xs text-slate-500">Removing this browser's data deletes its keys and message history. Signing in again here will set it up as a new device.</p>
         <section id="danger" aria-labelledby="danger-h" className="rounded-2xl bg-white p-5 ring-1 ring-red-200">
           <h2 id="danger-h" className="mb-3 font-semibold text-red-700">Delete account</h2>
           <DeleteAccount />

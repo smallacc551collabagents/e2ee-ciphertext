@@ -7,7 +7,7 @@ import { chatApi } from "./http";
 import { idbKv } from "./idb";
 import type { HistoryStore } from "./history";
 import { AttachmentError, browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
-import { onWipe, storeNameFor, wipeLocalE2EE } from "./wipe";
+import { closeLocalE2EE, onWipe, storeNameFor } from "./wipe";
 import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type MessageView, type SafetyInfo } from "./types";
 import type { ConversationWire, MessageWire } from "@e2ee/shared";
 
@@ -22,8 +22,8 @@ const http: BackendHttp = {
     });
     const json: unknown = await res.json().catch(() => null);
     if (res.status === 401) {
-      // Session expired: wipe local key stores before leaving.
-      await wipeLocalE2EE();
+      // Session expired: close stores; keys stay so re-login resumes this device.
+      closeLocalE2EE();
       await fetch("/session/expired", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
       window.location.replace("/login");
     }
