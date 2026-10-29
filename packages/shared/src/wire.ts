@@ -1,7 +1,6 @@
 import { z } from "zod";
-// DRAFT: key shapes may change (PR #13 vs #14 reconciliation pending). Keep usage behind ./http.ts + adapter only.
-
-// Wire contracts mirroring Backend Phase 1 (docs/phase1-backend.md, PR #13 — NOT MERGED YET).
+// Phase 1 HTTP wire contracts (backend/src/routes/transport.ts, keys routes). Single source for clients:
+// the frontend imports these from @e2ee/shared; do not fork them.
 // Keys and ciphertext are opaque standard-base64 bytes + integer version; their byte format
 // belongs to packages/crypto. Never add inner structure here.
 const b64 = z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, "standard base64");

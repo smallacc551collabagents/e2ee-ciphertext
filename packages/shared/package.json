@@ -6,5 +6,11 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "scripts": { "build": "tsc -b", "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false" }
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false"
+  },
+  "dependencies": {
+    "zod": "3"
+  }
 }
