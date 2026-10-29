@@ -125,7 +125,14 @@ export function createIdentityGate(store: PeerIdentityStore, now: () => number =
         return;
       }
       if (s.pendingChange) throw new CryptoError('IDENTITY_CHANGED', 'Peer identity changed; re-verify the safety number first');
-      checkPeerIdentity(s.identity, peer);
+      try {
+        checkPeerIdentity(s.identity, peer);
+      } catch (e) {
+        // Record the change so the UI can show the banner and acceptNewIdentity() can clear it. Without this a
+        // member first seen in a group (no 1:1 refresh) was silently excluded from key shares forever.
+        if (e instanceof CryptoError && e.code === 'IDENTITY_CHANGED') await store.set(peer.userId, { ...s, pendingChange: peer });
+        throw e;
+      }
     },
   };
 }

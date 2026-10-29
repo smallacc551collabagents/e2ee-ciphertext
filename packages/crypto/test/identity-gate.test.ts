@@ -68,3 +68,17 @@ describe('encrypt identity gate (E2EE-37, defense in depth)', () => {
     expect((await verifier.refresh(bobId)).status).toBe('unchanged');
   });
 });
+
+describe('identity gate records first-seen-in-group changes', () => {
+  it('TOFU on first sight, then a changed device sets pendingChange (banner) until accepted', async () => {
+    const mem = new Map<string, StoredPeer>();
+    const gate = createIdentityGate({ get: async (u: string) => mem.get(u), set: async (u: string, v: StoredPeer) => void mem.set(u, v) });
+    const d1 = { userId: 'd', deviceId: 'D1', ed25519: 'e1', curve25519: 'c1' };
+    const d2 = { userId: 'd', deviceId: 'D2', ed25519: 'e2', curve25519: 'c2' };
+    await gate.assertTrusted(d1);
+    expect(mem.get('d')?.identity).toEqual(d1);
+    await expect(gate.assertTrusted(d2)).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
+    expect(mem.get('d')?.pendingChange).toEqual(d2);
+    await expect(gate.assertUserNotPending('d')).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
+  });
+});
