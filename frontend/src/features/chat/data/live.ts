@@ -23,7 +23,7 @@ const http: BackendHttp = {
     const json: unknown = await res.json().catch(() => null);
     if (res.status === 401) {
       // Session expired: close stores; keys stay so re-login resumes this device.
-      closeLocalE2EE();
+      await closeLocalE2EE().catch(() => undefined);
       await fetch("/session/expired", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
       window.location.replace("/login");
     }
@@ -119,7 +119,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   let confirmedNewDevice = false;
   let state: Promise<DeviceState> | null = null;
   async function deviceState(): Promise<DeviceState> {
-    state ??= import("@e2ee/crypto").then((c) => c.localDeviceState({ http, username: me.username, storeName: storeNameFor(me.id) }));
+    state ??= import("@e2ee/crypto").then((c) => c.localDeviceState({ http, username: me.username, storeName: storeNameFor(me.id), deviceId: localStorage.getItem(`e2ee.deviceId.${me.id}`) ?? undefined }));
     state.catch(() => { state = null; });
     return state;
   }
