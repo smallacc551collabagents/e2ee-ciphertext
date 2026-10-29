@@ -290,11 +290,13 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       return { bytes: r.bytes, name: r.descriptor.name, mime: r.descriptor.mime };
     },
     displayText: (t) => display(t),
-        async safety(conversationId): Promise<SafetyInfo> {
-      const { c, adapter } = await init();
+    async safety(conversationId): Promise<SafetyInfo> {
+      const { c, adapter, verifier } = await init();
       const conv = convos.get(conversationId);
       if (!conv) return { digits: null, changed: false };
       const peerId = c.userIdFor(peerOf(conv).username);
+      // Re-check the peer's published identity on open, so a device change shows the banner before the first send fails.
+      try { note([await verifier.refresh(peerId)]); } catch { /* offline: fall back to the cached state */ }
       const pending = changed.get(peerId) ?? (await peers.get(peerId))?.pendingChange;
       const peer = pending ?? (await peers.get(peerId))?.identity ?? (await adapter.peerIdentities(peerId))[0];
       const digits = peer ? c.formatSafetyNumber(await c.safetyNumber(adapter.identity(), peer)) : null;
