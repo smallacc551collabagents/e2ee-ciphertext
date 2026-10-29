@@ -190,6 +190,11 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       thread.views = [...thread.views, ...out.filter((v) => !seen.has(v.id))].sort((a, b) => a.sentAt.localeCompare(b.sentAt));
       return thread.views;
     },
+    async createConversation(username) {
+      const { conversation: v } = await chatApi.createConversation(username.trim().replace(/^@/, ""));
+      convos.set(v.id, v);
+      return { id: v.id, name: peerOf(v).username, preview: "", lastActivityAt: v.createdAt ?? new Date().toISOString(), unread: 0 };
+    },
     async sendMessage(conversationId, text, clientId) {
       return sendPlain(conversationId, text, clientId);
     },
