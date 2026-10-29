@@ -269,7 +269,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const { c, texts } = await init();
     let r;
     try { r = await (await gc()).send(gid, text, clientId); } catch (e) {
-      if ((e as { status?: number }).status === 404 || (e as { status?: number }).status === 403) { convos.delete(gid); }
+      if ((e as { status?: number }).status === 404 || (e as { status?: number }).status === 403) { convos.delete(gid); threads.delete(gid); await (await gc()).forget(gid).catch(() => undefined); }
       throw e;
     }
     groupPending.set(gid, r.pending);
