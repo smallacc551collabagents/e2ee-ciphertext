@@ -100,3 +100,30 @@ There is no key backup in the MVP, so **message history is not recoverable on a 
 - A stolen, still-unlocked browser keeps local history until the user revokes it from another device or the data is wiped;
   remote wipe is out of scope.
 - Multi-device per user is not supported; this design changes with the group protocol decision (E2EE-53).
+
+## New device sign-in (E2EE-79)
+
+Code: `packages/crypto/src/device-state.ts`; live adapter: `frontend/src/features/chat/data/live.ts`.
+Tests: `packages/crypto/test/device-state.test.ts`, `frontend/e2e/live-adapter.unit.spec.ts`.
+
+**No silent replacement.** Opening the Olm adapter publishes this browser's identity (and replaces the
+account's device on the server). Before opening it, the live adapter calls `localDeviceState()`:
+- `existing`: this browser holds a wrapped store key (`<store>-wrap` in IndexedDB) -> open normally.
+- `fresh`: no local keystore and `GET /keys/identity/:username` -> 404 -> first device, open normally.
+- `needs-new-device-confirmation`: no local keystore but the server already has an identity. Every adapter
+  call throws `NewDeviceRequiredError` (`code: "NEW_DEVICE_CONFIRMATION_REQUIRED"`) and nothing is published
+  until the UI shows the "this browser becomes your new device" screen (old history doesn't carry over;
+  contacts will be notified) and calls `confirmNewDevice()`.
+- Any other error from the identity check fails closed (`TRANSPORT_FAILED`).
+The probe is read-only: it never creates a keystore and never touches another browser's keys. The old
+browser keeps its local store; it is simply no longer the published device (see revocation above).
+
+**Peer side.** When a peer's published identity changes, `classifyIdentityChange(stored, current)` returns
+`new-device` if the deviceId differs (peer signed in on a new browser, the normal case) or `key-changed`
+if the same deviceId now has different keys (unexpected; treat as a warning). The live adapter exposes this
+via `peerChange(conversationId)` and `safety().changeKind`. Either way sending stays blocked
+(`IDENTITY_CHANGED` / `IdentityChangedError`) until `acceptNewIdentity()`.
+
+**No backend change.** The existing `POST /keys/publish` and `GET /keys/identity/:username` are reused.
+A client that skips the check (old build, malicious client) can still replace the identity; peers then
+see the change through the identity gate, so this is a UX safeguard, not a security boundary.

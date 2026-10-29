@@ -32,7 +32,20 @@ export class IdentityChangedError extends Error {
   constructor(public readonly peerId: string) { super("Safety number changed"); }
 }
 
-export interface SafetyInfo { digits: string[] | null; changed: boolean }
+/** Local device state (E2EE-79). "needs-new-device-confirmation": the account already has keys on another browser. */
+export type DeviceState = "fresh" | "existing" | "needs-new-device-confirmation";
+
+/** Thrown by live adapter calls until confirmNewDevice() when this browser would replace the account's device. */
+export class NewDeviceRequiredError extends Error {
+  readonly code = "NEW_DEVICE_CONFIRMATION_REQUIRED";
+  constructor() { super("This browser is a new device; confirm before publishing new keys"); }
+}
+
+/** Why a peer's safety number changed. "new-device": peer signed in on a new browser; "key-changed": same device, different keys (unexpected). */
+export type IdentityChangeKind = "new-device" | "key-changed";
+export interface PeerIdentityChange { peerId: string; username: string; kind: IdentityChangeKind }
+
+export interface SafetyInfo { digits: string[] | null; changed: boolean; changeKind?: IdentityChangeKind }
 
 export interface ChatAdapter {
   readonly id: string;
@@ -46,6 +59,12 @@ export interface ChatAdapter {
   /** Optional: safety number + identity-changed state (live adapter only). */
   safety?(conversationId: string): Promise<SafetyInfo>;
   acceptNewIdentity?(conversationId: string): Promise<void>;
+  /** E2EE-79: check before rendering chat. Does not publish anything. */
+  deviceState?(): Promise<DeviceState>;
+  /** E2EE-79: user confirmed "use this browser as my new device" -> publish the new identity. */
+  confirmNewDevice?(): Promise<void>;
+  /** E2EE-79: pending peer identity change for a conversation (null if none). Sending stays blocked until acceptNewIdentity. */
+  peerChange?(conversationId: string): Promise<PeerIdentityChange | null>;
   /** Start (or reopen) a direct conversation. Existing conversations are returned, not duplicated. */
   createConversation?(username: string): Promise<ConversationView>;
 }

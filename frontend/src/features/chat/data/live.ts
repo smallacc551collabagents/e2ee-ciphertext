@@ -8,7 +8,7 @@ import { idbKv } from "./idb";
 import type { HistoryStore } from "./history";
 import { browserDeps, decodeAttachmentMessage, encodeAttachmentMessage, openAttachment as openAtt, sendAttachment as sendAtt } from "../attachments/flow";
 import { onWipe, storeNameFor, wipeLocalE2EE } from "./wipe";
-import { IdentityChangedError, type ChatAdapter, type ConversationView, type MessageView, type SafetyInfo } from "./types";
+import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type MessageView, type SafetyInfo } from "./types";
 import type { ConversationWire, MessageWire } from "@e2ee/shared";
 
 export interface Me { id: string; username: string }
@@ -99,6 +99,11 @@ export function keyedSerial() {
   };
 }
 
+/** E2EE-79: opening the adapter (which publishes keys) is only allowed for fresh/existing devices or after explicit confirmation. */
+export function assertMayOpen(state: DeviceState, confirmed: boolean): void {
+  if (state === "needs-new-device-confirmation" && !confirmed) throw new NewDeviceRequiredError();
+}
+
 export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   const serial = keyedSerial();
   const threads = new Map<string, { after?: string; views: MessageView[]; cache?: Map<string, string> }>();
@@ -111,9 +116,26 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     for (const r of rs) if (r.status === "changed" && r.current) changed.set(r.userId, r.current);
   };
 
+  let confirmedNewDevice = false;
+  let state: Promise<DeviceState> | null = null;
+  async function deviceState(): Promise<DeviceState> {
+    state ??= import("@e2ee/crypto").then((c) => c.localDeviceState({ http, username: me.username, storeName: storeNameFor(me.id) }));
+    state.catch(() => { state = null; });
+    return state;
+  }
+
+  async function changeKind(peerId: string): Promise<IdentityChangeKind | undefined> {
+    const s = await peers.get(peerId);
+    const cur = changed.get(peerId) ?? s?.pendingChange;
+    if (!cur) return undefined;
+    const c = await import("@e2ee/crypto");
+    return c.classifyIdentityChange(s?.identity, cur);
+  }
+
   function init() {
     ctx ??= (async () => {
       const c = await import("@e2ee/crypto");
+      assertMayOpen(await deviceState(), confirmedNewDevice);
       const adapter = await c.createOlmAdapter(olmOptions(c, me, deviceIdFor(me.id), peers));
       await adapter.sync();
       await adapter.replenishPrekeys((await chatApi.prekeyCount()).oneTimePrekeyCount);
@@ -240,7 +262,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const pending = changed.get(peerId) ?? (await peers.get(peerId))?.pendingChange;
       const peer = pending ?? (await peers.get(peerId))?.identity ?? (await adapter.peerIdentities(peerId))[0];
       const digits = peer ? c.formatSafetyNumber(await c.safetyNumber(adapter.identity(), peer)) : null;
-      return { digits, changed: !!pending };
+      return pending ? { digits, changed: true, changeKind: await changeKind(peerId) } : { digits, changed: false };
     },
     async acceptNewIdentity(conversationId) {
       const { c, verifier } = await init();
@@ -249,6 +271,21 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const peerId = c.userIdFor(peerOf(conv).username);
       const id = changed.get(peerId) ?? (await peers.get(peerId))?.pendingChange;
       if (id) { await verifier.acceptNewIdentity(id); changed.delete(peerId); }
+    },
+    deviceState,
+    async confirmNewDevice() {
+      confirmedNewDevice = true;
+      ctx = null;
+      await init();
+      state = Promise.resolve("existing");
+    },
+    async peerChange(conversationId): Promise<PeerIdentityChange | null> {
+      const { c } = await init();
+      const conv = convos.get(conversationId);
+      if (!conv) return null;
+      const peerId = c.userIdFor(peerOf(conv).username);
+      const kind = await changeKind(peerId);
+      return kind ? { peerId, username: peerOf(conv).username, kind } : null;
     },
   };
 }

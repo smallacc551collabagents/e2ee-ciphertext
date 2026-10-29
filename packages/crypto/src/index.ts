@@ -10,3 +10,4 @@ export * from './history-store.js';
 export * from './attachments.js';
 export * from './revocation.js';
 export * from './groups.js';
+export * from './device-state.js';
