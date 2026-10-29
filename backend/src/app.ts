@@ -6,6 +6,7 @@ import { authRoutes } from "./routes/auth.js";
 import { transportRoutes } from "./routes/transport.js";
 import { groupRoutes } from "./routes/groups.js";
 import { attachmentRoutes } from "./routes/attachments.js";
+import { syncRoutes } from "./routes/sync.js";
 
 import rateLimit from "@fastify/rate-limit";
 import { SharedStore, setRateLimitLogger } from "./utils/rateLimiter.js";
@@ -78,6 +79,7 @@ export function buildApp(): FastifyInstance {
   void app.register(transportRoutes);
   void app.register(groupRoutes);
   void app.register(attachmentRoutes);
+  void app.register(syncRoutes);
 
   // TODO(Phase 0): authenticated WebSocket doorbell (backend/src/websocket).
   return app;

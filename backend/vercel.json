@@ -4,6 +4,6 @@
   "installCommand": "corepack enable && pnpm install --frozen-lockfile",
   "buildCommand": "pnpm run vercel-build",
   "outputDirectory": "public",
-  "functions": { "api/index.ts": { "maxDuration": 10 } },
+  "functions": { "api/index.ts": { "maxDuration": 35 } },
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
 }

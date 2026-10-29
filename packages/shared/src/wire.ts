@@ -154,3 +154,19 @@ export type CreateGroupRequest = z.infer<typeof createGroupRequestSchema>;
 export type MessageWire = z.infer<typeof messageSchema>;
 export type PrekeyBundle = z.infer<typeof prekeyBundleSchema>;
 export type PublishKeysRequest = z.infer<typeof publishKeysRequestSchema>;
+
+// ---------- realtime long-poll (GET /sync/wait) ----------
+// Doorbell only: never acks or returns content. `cursor` is opaque; echo the last one you got.
+export const SYNC_WAIT_MAX_SECONDS = 25;
+export const syncCursorSchema = z.string().regex(/^v1\.[0-9]{1,9}\.[0-9]{1,15}\.[0-9]{1,15}$/);
+export const syncWaitQuerySchema = z.object({
+  since: syncCursorSchema.optional(),
+  timeout: z.string().regex(/^[0-9]{1,2}$/).optional(),
+}).strict();
+export const syncWaitResponseSchema = z.object({
+  changed: z.boolean(),
+  cursor: syncCursorSchema,
+  conversations: z.array(z.string()),
+  toDevice: z.boolean(),
+});
+export type SyncWaitResponse = z.infer<typeof syncWaitResponseSchema>;
