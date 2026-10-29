@@ -10,7 +10,7 @@
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "vercel-build": "prisma generate",
+    "vercel-build": "pnpm --filter @e2ee/shared build && prisma generate",
     "prisma:deploy": "prisma migrate deploy",
     "clean": "rm -rf dist .vercel tsconfig.tsbuildinfo",
     "build:clean": "pnpm run clean && pnpm run prisma:generate && pnpm run build",

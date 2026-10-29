@@ -224,3 +224,23 @@ test("keys: consumed keyId can be re-uploaded after identity rotation; unused ke
   const b = (await call(alice, "GET", "/keys/bundle/hank")).json();
   assert.equal(b.oneTimePrekey.version, 2, "hands out the new key, not the consumed one");
 });
+
+test("validation: @e2ee/shared schemas reject bad input with the 400 validation_error shape", async () => {
+  const cases: [string, string, object][] = [
+    ["POST", "/conversations", { username: "bob", extra: 1 }],
+    ["POST", "/conversations", { username: "x" }],
+    ["POST", "/keys/publish", {}],
+    ["POST", "/keys/publish", { oneTimePrekeys: [] }],
+    ["POST", "/messages/ack", { messageIds: [] }],
+    ["POST", "/conversations/not-a-uuid/messages", { clientMsgId: "abcdefgh", ciphertext: b64(8), version: 1 }],
+    ["POST", "/conversations/00000000-0000-0000-0000-000000000000/messages", { clientMsgId: "abcdefgh", ciphertext: b64(32 * 1024 + 1), version: 1 }],
+  ];
+  for (const [m, u, p] of cases) {
+    const r = await call(alice, m as "POST", u, p);
+    assert.equal(r.statusCode, 400, `${u} ${JSON.stringify(p).slice(0, 60)}`);
+    assert.equal(r.json().error, "validation_error");
+    assert.equal(typeof r.json().message, "string");
+  }
+  const q = await call(alice, "GET", "/conversations/00000000-0000-0000-0000-000000000000/messages?bogus=1");
+  assert.equal(q.statusCode, 400);
+});
