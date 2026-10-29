@@ -1,8 +1,9 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { chatAdapter, FeatureUnavailableError, IdentityChangedError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
+import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
 import { AttachmentError, type Phase } from "./attachments/flow";
+import { changeKindLabel, identityWarning, NEW_DEVICE_COPY } from "./identityCopy";
 import { newChatErrorMessage, validatePeerUsername } from "./newChat";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
 
@@ -33,6 +34,14 @@ function LockBadge() {
 export function ChatView({ username, userId = "" }: { username: string; userId?: string }) {
   const adapter = useMemo(() => chatAdapter(userId ? { id: userId, username } : undefined), [userId, username]);
   const [safety, setSafety] = useState<SafetyInfo | null>(null);
+  // E2EE-79: check the local device before anything that could publish keys.
+  const [device, setDevice] = useState<"checking" | "ok" | "confirm" | "confirming">(adapter.deviceState ? "checking" : "ok");
+  useEffect(() => {
+    if (!adapter.deviceState) return;
+    let live = true;
+    adapter.deviceState().then((s) => live && setDevice(s === "needs-new-device-confirmation" ? "confirm" : "ok"), () => live && setDevice("ok"));
+    return () => { live = false; };
+  }, [adapter]);
   const [showInfo, setShowInfo] = useState(false);
   const [convos, setConvos] = useState<Load<ConversationView[]>>({ state: "loading" });
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -70,13 +79,13 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
 
   const loadConvos = useCallback(() => {
     setConvos({ state: "loading" });
-    adapter.listConversations().then((data) => setConvos({ state: "ready", data }), (e) => setConvos(toLoad(e)));
+    adapter.listConversations().then((data) => setConvos({ state: "ready", data }), (e) => { if (e instanceof NewDeviceRequiredError) setDevice("confirm"); setConvos(toLoad(e)); });
   }, [adapter]);
-  useEffect(loadConvos, [loadConvos]);
+  useEffect(() => { if (device === "ok") loadConvos(); }, [device, loadConvos]);
 
   const loadMsgs = useCallback((id: string) => {
     setMsgs({ state: "loading" });
-    adapter.listMessages(id).then((data) => setMsgs({ state: "ready", data }), (e) => setMsgs(toLoad(e)))
+    adapter.listMessages(id).then((data) => setMsgs({ state: "ready", data }), (e) => { if (e instanceof NewDeviceRequiredError) setDevice("confirm"); setMsgs(toLoad(e)); })
       .finally(() => { void adapter.safety?.(id).then(setSafety, () => setSafety(null)); });
   }, [adapter]);
   useEffect(() => { setSafety(null); setShowInfo(false); }, [activeId]);
@@ -158,6 +167,25 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
     form.reset();
     void send(text, clientId);
   }
+
+  async function confirmDevice() {
+    if (!adapter.confirmNewDevice) return;
+    setDevice("confirming");
+    try { await adapter.confirmNewDevice(); setDevice("ok"); } catch { setDevice("confirm"); }
+  }
+  if (device !== "ok") return (
+    <main className="flex min-h-dvh items-center justify-center p-6">
+      {device === "checking" ? <p aria-busy="true" className="text-sm text-slate-500">Checking this browser…</p> : (
+        <section role="dialog" aria-modal="true" aria-labelledby="new-device-title" data-testid="new-device" className="max-w-md rounded-2xl bg-white p-6 ring-1 ring-slate-200">
+          <h1 id="new-device-title" className="text-lg font-semibold">{NEW_DEVICE_COPY.title}</h1>
+          <p className="mt-3 text-sm text-slate-600">{NEW_DEVICE_COPY.body}</p>
+          <button type="button" onClick={() => void confirmDevice()} disabled={device === "confirming"} className="mt-5 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-60">
+            {device === "confirming" ? "Setting up…" : NEW_DEVICE_COPY.confirm}
+          </button>
+        </section>
+      )}
+    </main>
+  );
 
   return (
     <div className="flex h-full bg-slate-50">
@@ -258,7 +286,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
             </header>
             {safety?.changed && (
               <div role="alert" data-testid="identity-changed" className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
-                <span>Safety number with {active.name} changed. Verify it with them before sending.</span>
+                <span data-kind={safety.changeKind ?? "unknown"}>{identityWarning(active.name, safety.changeKind)}</span>
                 <span className="flex gap-2">
                   <button type="button" onClick={() => setShowInfo(true)} className="underline">View safety number</button>
                   <button type="button" onClick={() => void acceptIdentity()} className="rounded-full bg-amber-600 px-3 py-1 text-white">I’ve verified it</button>
@@ -268,6 +296,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
             {showInfo && (
               <aside aria-label="Conversation info" data-testid="safety-number" className="border-b border-slate-200 bg-white px-4 py-3 text-sm">
                 <p className="font-medium">Safety number</p>
+                {safety?.changed && changeKindLabel(safety.changeKind) && <p data-testid="change-kind" className="mt-1 text-amber-800">Change: {changeKindLabel(safety.changeKind)}. Sending is blocked until you verify.</p>}
                 {safety?.digits ? (
                   <p className="mt-1 grid max-w-xs grid-cols-4 gap-x-3 font-mono tracking-wider">{safety.digits.map((d, i) => <span key={i}>{d}</span>)}</p>
                 ) : (

@@ -64,3 +64,6 @@ export function upstreamUrl(base: string, path: string[], search: string): strin
   const p = path.map(encodeURIComponent).join("/");
   return `${base}/${p}${search}`;
 }
+
+/** Every method except GET/HEAD forwards its body (DELETE /auth/me carries {password}). */
+export const forwardsBody = (method: string): boolean => method !== "GET" && method !== "HEAD";
