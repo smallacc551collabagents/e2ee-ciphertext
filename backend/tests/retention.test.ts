@@ -157,6 +157,8 @@ test("DELETE /auth/me removes everything the user owns; others keep their side",
   assert.ok(!objects.has(`a/${ref}`), "blob deleted");
   assert.ok(await exists("conversations", "id", c2), "bob still a member => conversation kept");
   assert.equal((await call(dave, "GET", "/auth/me")).statusCode, 401, "session gone");
+  await sweepMessages();
+  assert.ok(!(await exists("messages", "id", fromBob)), "message only the deleted user was owed is swept");
   // Bob deletes too => conversation now empty => removed.
   assert.equal((await call(bob, "DELETE", "/auth/me", { password: "correct-horse-battery" })).statusCode, 204);
   assert.ok(!(await exists("conversations", "id", c2)), "empty conversation removed");
