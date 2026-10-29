@@ -71,7 +71,11 @@ describe('browser crypto adapter acceptance (E2EE-29)', () => {
     expect([...seen].filter((k) => !allowed.has(k))).toEqual([]);
     // Published key blobs decode to public material only.
     const blobs = be.bodies.flatMap((b) => [...JSON.stringify(JSON.parse(b)).matchAll(/"publicKey":"([^"]+)"/g)].map((m) => Buffer.from(m[1]!, 'base64').toString('latin1')));
-    expect(blobs.join('\n').toLowerCase()).not.toMatch(/private|secret|pickle|seed/);
+    // Check field NAMES only: random base64 key values can contain e.g. "seed" by chance (CI flake on #39).
+    const names: string[] = [];
+    const walk = (v: unknown): void => { if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { names.push(k); walk(x); } };
+    for (const blob of blobs) { let parsed: unknown; try { parsed = JSON.parse(blob); } catch { parsed = undefined; } if (parsed === undefined) expect(blob.toLowerCase()).not.toMatch(/private|secret|pickle/); else walk(parsed); }
+    expect(names.join('\n').toLowerCase()).not.toMatch(/private|secret|pickle|seed/);
     alice.close(); bob.close();
   });
 
