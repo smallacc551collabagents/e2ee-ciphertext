@@ -56,6 +56,15 @@ export const sendMessageRequestSchema = z.object({
 export const deleteAccountRequestSchema = z.object({ password: z.string().min(1).max(PASSWORD_MAX) }).strict();
 export const sendMessageResponseSchema = z.object({ message: messageSchema, duplicate: z.boolean() });
 export const messagePageSchema = z.object({ messages: z.array(messageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean() });
+// Resend-on-new-identity: GET /conversations/:id/undeliverable -> own messages whose recipient published a
+// new identity before fetching. Re-encrypt to the new bundle and POST with the SAME clientMsgId: the server
+// replaces ciphertext/version in place (same id + seq) and returns duplicate:false.
+export const UNDELIVERABLE_DEVICE_CHANGED = "undeliverable_device_changed" as const;
+export const undeliverableItemSchema = z.object({
+  messageId: z.string(), clientMsgId: z.string(), seq: z.string().regex(/^\d+$/), recipientId: z.string(),
+  reason: z.string(),
+});
+export const undeliverableListSchema = z.object({ undeliverable: z.array(undeliverableItemSchema) });
 export const ackRequestSchema = z.object({ messageIds: z.array(uuidSchema).min(1).max(500).refine((a) => new Set(a).size === a.length, "unique items") }).strict();
 export const ackResponseSchema = z.object({ acked: z.number().int().nonnegative() });
 
@@ -82,6 +91,7 @@ export const prekeyBundleSchema = z.object({
 });
 
 export type ConversationWire = z.infer<typeof conversationSchema>;
+export type UndeliverableWire = z.infer<typeof undeliverableItemSchema>;
 export type MessageWire = z.infer<typeof messageSchema>;
 export type PrekeyBundle = z.infer<typeof prekeyBundleSchema>;
 export type PublishKeysRequest = z.infer<typeof publishKeysRequestSchema>;

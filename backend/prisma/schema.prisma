@@ -148,6 +148,10 @@ model MessageDelivery {
   messageId   String    @map("message_id") @db.Uuid
   recipientId String    @map("recipient_id") @db.Uuid
   deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(3)
+  /// SHA-256 of the recipient's identity public key at send time (NULL = legacy row).
+  recipientIdentityDigest Bytes? @map("recipient_identity_digest")
+  /// 'undeliverable_device_changed' while awaiting the sender's re-encrypted resend.
+  undeliverableReason String? @map("undeliverable_reason")
   message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
   recipient   User      @relation(fields: [recipientId], references: [id], onDelete: Cascade)
 
