@@ -31,9 +31,5 @@ export async function sweepMessages(limit: number = RETENTION.batch): Promise<nu
     `DELETE FROM messages WHERE id IN (
        SELECT id FROM messages WHERE created_at < now() - make_interval(days => $2) ORDER BY created_at LIMIT $1)`,
     [limit, RETENTION.undeliveredTtlDays]);
-  const stale = await q().query(
-    `DELETE FROM resend_needed WHERE ctid IN (
-       SELECT ctid FROM resend_needed WHERE created_at < now() - make_interval(days => $2) LIMIT $1)`,
-    [limit, RETENTION.undeliveredTtlDays]);
-  return (acked.rowCount ?? 0) + (old.rowCount ?? 0) + (stale.rowCount ?? 0);
+  return (acked.rowCount ?? 0) + (old.rowCount ?? 0);
 }

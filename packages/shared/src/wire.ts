@@ -55,26 +55,18 @@ export const sendMessageRequestSchema = z.object({
 }).strict();
 export const deleteAccountRequestSchema = z.object({ password: z.string().min(1).max(PASSWORD_MAX) }).strict();
 export const sendMessageResponseSchema = z.object({ message: messageSchema, duplicate: z.boolean() });
-// Resend-on-new-identity: messages YOU sent that the recipient can no longer decrypt (they published a
-// new identity key before fetching). The server removed them from the recipient's queue; re-encrypt from
-// local history to the recipient's new bundle, resend with the SAME clientMsgId, then clear via ack.resendAcks.
-export const resendNeededSchema = z.object({
-  conversationId: z.string(),
-  clientMsgId: z.string(),
-  recipient: memberSchema,
-  reason: z.string(), // "identity_changed"
-  createdAt: z.string(),
+export const messagePageSchema = z.object({ messages: z.array(messageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean() });
+// Resend-on-new-identity: GET /conversations/:id/undeliverable -> own messages whose recipient published a
+// new identity before fetching. Re-encrypt to the new bundle and POST with the SAME clientMsgId: the server
+// replaces ciphertext/version in place (same id + seq) and returns duplicate:false.
+export const UNDELIVERABLE_DEVICE_CHANGED = "undeliverable_device_changed" as const;
+export const undeliverableItemSchema = z.object({
+  messageId: z.string(), clientMsgId: z.string(), seq: z.string().regex(/^\d+$/), recipientId: z.string(),
+  reason: z.string(),
 });
-export const messagePageSchema = z.object({
-  messages: z.array(messageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean(),
-  resendNeeded: z.array(resendNeededSchema).optional(),
-});
-export const resendAckSchema = z.object({ conversationId: uuidSchema, clientMsgId: clientMsgIdSchema, recipientId: uuidSchema }).strict();
-export const ackRequestSchema = z.object({
-  messageIds: z.array(uuidSchema).min(1).max(500).refine((a) => new Set(a).size === a.length, "unique items").optional(),
-  resendAcks: z.array(resendAckSchema).min(1).max(500).optional(),
-}).strict().refine((o) => !!o.messageIds || !!o.resendAcks, "messageIds or resendAcks required");
-export const ackResponseSchema = z.object({ acked: z.number().int().nonnegative(), resendAcked: z.number().int().nonnegative().optional() });
+export const undeliverableListSchema = z.object({ undeliverable: z.array(undeliverableItemSchema) });
+export const ackRequestSchema = z.object({ messageIds: z.array(uuidSchema).min(1).max(500).refine((a) => new Set(a).size === a.length, "unique items") }).strict();
+export const ackResponseSchema = z.object({ acked: z.number().int().nonnegative() });
 
 // Key shapes: strict for requests; responses (prekeyBundleSchema) use the non-strict base so fields the
 // server adds later are stripped, not rejected. Rule: request schemas .strict(), response schemas never.
@@ -99,7 +91,7 @@ export const prekeyBundleSchema = z.object({
 });
 
 export type ConversationWire = z.infer<typeof conversationSchema>;
-export type ResendNeededWire = z.infer<typeof resendNeededSchema>;
+export type UndeliverableWire = z.infer<typeof undeliverableItemSchema>;
 export type MessageWire = z.infer<typeof messageSchema>;
 export type PrekeyBundle = z.infer<typeof prekeyBundleSchema>;
 export type PublishKeysRequest = z.infer<typeof publishKeysRequestSchema>;

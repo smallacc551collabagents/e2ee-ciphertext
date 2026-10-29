@@ -58,6 +58,7 @@ function bytes(s: string, max: number): Buffer | null {
   return b;
 }
 const digest = (b: Buffer) => createHash("sha256").update(b).digest();
+const UNDELIVERABLE = "undeliverable_device_changed";
 const enc = (b: Buffer | null | undefined) => (b ? Buffer.from(b).toString("base64") : null);
 
 async function isMember(c: Queryable, conversationId: string, userId: string): Promise<boolean> {
@@ -111,24 +112,12 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
           [uid, ik, identityKey.version, signedPrekey.keyId, spk, sig, signedPrekey.version]);
         // A new identity key invalidates every outstanding one-time prekey.
         if (exists) await c.query(`DELETE FROM one_time_prekeys WHERE user_id = $1 AND consumed_at IS NULL`, [uid]);
-        // Identity CHANGED (new device): pending messages encrypted to the old identity are undecryptable.
-        // Pull them from my queue (I never fetch them) and tell each sender to re-encrypt + resend.
-        if (oldIk && !Buffer.from(oldIk).equals(ik)) {
-          const newD = digest(ik);
-          const stale = await c.query<{ message_id: string }>(
-            `DELETE FROM message_deliveries WHERE recipient_id = $1 AND delivered_at IS NULL
-               AND (recipient_identity_digest IS NULL OR recipient_identity_digest <> $2) RETURNING message_id`, [uid, newD]);
-          const ids = stale.rows.map((r) => r.message_id);
-          if (ids.length) {
-            await c.query(
-              `INSERT INTO resend_needed (sender_id, conversation_id, client_msg_id, recipient_id, reason)
-               SELECT m.sender_id, m.conversation_id, m.client_msg_id, $1, 'identity_changed' FROM messages m WHERE m.id = ANY($2::uuid[])
-               ON CONFLICT (sender_id, conversation_id, client_msg_id, recipient_id) DO UPDATE SET created_at = now(), reason = EXCLUDED.reason`,
-              [uid, ids]);
-            // Free the clientMsgId so the sender's resend isn't deduped (no other pending recipient).
-            await deleteFullyAcked(ids, c);
-          }
-        }
+        // Identity CHANGED (new device): my unacked incoming messages encrypted to the old identity are
+        // undecryptable. Flag them (hidden from me) so each sender can list + re-encrypt + resend in place.
+        if (oldIk && !Buffer.from(oldIk).equals(ik)) await c.query(
+          `UPDATE message_deliveries SET undeliverable_reason = $3
+            WHERE recipient_id = $1 AND delivered_at IS NULL
+              AND (recipient_identity_digest IS NULL OR recipient_identity_digest <> $2)`, [uid, digest(ik), UNDELIVERABLE]);
       } else if (ik || spk) {
         if (ik && identityKey) throw new ApiError(400, "signed_prekey_required", "Replacing identityKey requires a new signedPrekey.");
         if (spk && sig && signedPrekey) await c.query(
@@ -255,9 +244,17 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
       return await txReply(reply, async (c) => {
       if (!(await isMember(c, req.params.id, uid))) throw new ApiError(404, "not_found", "Conversation not found.");
       const dup = await findDup(c);
-      if (dup.rows[0]) return reply.code(200).send({ message: msgDto(dup.rows[0]), duplicate: true });
-      // A (re)send for a recipient clears matching resend entries automatically.
-      await c.query(`DELETE FROM resend_needed WHERE sender_id = $1 AND conversation_id = $2 AND client_msg_id = $3`, [uid, req.params.id, req.body.clientMsgId]);
+      const d0 = dup.rows[0];
+      if (d0) {
+        // Resend after the recipient changed device: replace ciphertext in place (same id + seq), re-stamp, unflag.
+        const fl = await c.query(
+          `UPDATE message_deliveries d SET undeliverable_reason = NULL,
+                  recipient_identity_digest = (SELECT sha256(k.identity_key) FROM identity_keys k WHERE k.user_id = d.recipient_id)
+            WHERE d.message_id = $1 AND d.undeliverable_reason IS NOT NULL AND d.delivered_at IS NULL`, [d0.id]);
+        if (!(fl.rowCount ?? 0)) return reply.code(200).send({ message: msgDto(d0), duplicate: true });
+        const up = await c.query<MsgRow>(`UPDATE messages SET ciphertext = $2, version = $3 WHERE id = $1 RETURNING *`, [d0.id, blob, req.body.version]);
+        return reply.code(200).send({ message: msgDto(up.rows[0] as MsgRow), duplicate: false });
+      }
       // Row lock on the conversation serializes seq allocation => gap-free, monotonic.
       const s = await c.query<{ last_seq: string }>(`UPDATE conversations SET last_seq = last_seq + 1 WHERE id = $1 RETURNING last_seq`, [req.params.id]);
       const m = await c.query<MsgRow>(
@@ -299,46 +296,36 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     const limit = Math.min(Math.max(Number(req.query.limit ?? LIMITS.pageSize), 1), LIMITS.pageSize);
     const r = await q().query<MsgRow & { delivered_at: Date | null }>(
       `SELECT m.* FROM messages m WHERE m.conversation_id = $1 AND m.seq > $2::bigint
-         AND (m.sender_id = $4 OR EXISTS (SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_id = $4))
+         AND NOT EXISTS (SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_id = $4 AND d.undeliverable_reason IS NOT NULL)
        ORDER BY m.seq LIMIT $3`, [req.params.id, req.query.after ?? "0", limit + 1, uid]);
     const page = r.rows.slice(0, limit).map(msgDto);
-    // Only MY sent messages, in THIS conversation (membership checked above).
-    const rs = await q().query<{ conversation_id: string; client_msg_id: string; recipient_id: string; username: string; reason: string; created_at: Date }>(
-      `SELECT r.conversation_id, r.client_msg_id, r.recipient_id, u.username, r.reason, r.created_at
-         FROM resend_needed r JOIN users u ON u.id = r.recipient_id
-        WHERE r.sender_id = $1 AND r.conversation_id = $2 ORDER BY r.created_at, r.client_msg_id LIMIT $3`, [uid, req.params.id, LIMITS.ackBatch]);
-    const resendNeeded = rs.rows.map((x) => ({
-      conversationId: x.conversation_id, clientMsgId: x.client_msg_id, recipient: { id: x.recipient_id, username: x.username },
-      reason: x.reason, createdAt: new Date(x.created_at).toISOString(),
-    }));
-    return { messages: page, nextCursor: page.length ? page[page.length - 1]?.seq : (req.query.after ?? "0"), hasMore: r.rows.length > limit, ...(resendNeeded.length ? { resendNeeded } : {}) };
+    return { messages: page, nextCursor: page.length ? page[page.length - 1]?.seq : (req.query.after ?? "0"), hasMore: r.rows.length > limit };
   });
 
-  app.post<{ Body: { messageIds?: string[]; resendAcks?: { conversationId: string; clientMsgId: string; recipientId: string }[] } }>("/messages/ack", {
+  // Own messages flagged undeliverable (recipient changed device), seq order. Members only; sender-scoped.
+  app.get<{ Params: { id: string } }>("/conversations/:id/undeliverable", {
+    ...shared({ params: conversationParamsSchema }),
+  }, async (req, reply) => {
+    const uid = me(req).id;
+    if (!(await isMember(q(), req.params.id, uid))) return err(reply, 404, "not_found", "Conversation not found.");
+    const r = await q().query<{ id: string; client_msg_id: string; seq: string; recipient_id: string; undeliverable_reason: string }>(
+      `SELECT m.id, m.client_msg_id, m.seq, d.recipient_id, d.undeliverable_reason
+         FROM messages m JOIN message_deliveries d ON d.message_id = m.id
+        WHERE m.conversation_id = $1 AND m.sender_id = $2 AND d.undeliverable_reason IS NOT NULL AND d.delivered_at IS NULL
+        ORDER BY m.seq LIMIT 500`, [req.params.id, uid]);
+    return { undeliverable: r.rows.map((x) => ({ messageId: x.id, clientMsgId: x.client_msg_id, seq: String(x.seq), recipientId: x.recipient_id, reason: x.undeliverable_reason })) };
+  });
+
+  app.post<{ Body: { messageIds: string[] } }>("/messages/ack", {
     ...shared({ body: ackRequestSchema }),
   }, async (req) => {
-    const ids = req.body.messageIds ?? [];
-    let acked = 0;
-    if (ids.length) {
-      // Scoped to recipient_id = caller, so acking others' or unknown ids is a silent no-op.
-      const r = await q().query(
-        `UPDATE message_deliveries SET delivered_at = now() WHERE recipient_id = $1 AND message_id = ANY($2::uuid[]) AND delivered_at IS NULL`,
-        [me(req).id, ids]);
-      acked = r.rowCount ?? 0;
-      // Retention: drop ciphertext as soon as every recipient has acked it.
-      try { await deleteFullyAcked(ids); } catch (e) { app.log.error({ err: { name: (e as Error)?.name } }, "ack retention delete failed"); }
-    }
-    let resendAcked: number | undefined;
-    const ra = req.body.resendAcks ?? [];
-    if (ra.length) {
-      // Scoped to sender_id = caller: clearing someone else's entries is a silent no-op.
-      const r = await q().query(
-        `DELETE FROM resend_needed r USING unnest($2::uuid[], $3::text[], $4::uuid[]) AS t(c, m, u)
-          WHERE r.sender_id = $1 AND r.conversation_id = t.c AND r.client_msg_id = t.m AND r.recipient_id = t.u`,
-        [me(req).id, ra.map((x) => x.conversationId), ra.map((x) => x.clientMsgId), ra.map((x) => x.recipientId)]);
-      resendAcked = r.rowCount ?? 0;
-    }
+    // Scoped to recipient_id = caller, so acking others' or unknown ids is a silent no-op.
+    const r = await q().query(
+      `UPDATE message_deliveries SET delivered_at = now() WHERE recipient_id = $1 AND message_id = ANY($2::uuid[]) AND delivered_at IS NULL AND undeliverable_reason IS NULL`,
+      [me(req).id, req.body.messageIds]);
+    // Retention: drop ciphertext as soon as every recipient has acked it.
+    try { await deleteFullyAcked(req.body.messageIds); } catch (e) { app.log.error({ err: { name: (e as Error)?.name } }, "ack retention delete failed"); }
     await maybeSweep();
-    return { acked, ...(resendAcked !== undefined ? { resendAcked } : {}) };
+    return { acked: r.rowCount ?? 0 };
   });
 }

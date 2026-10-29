@@ -150,6 +150,8 @@ model MessageDelivery {
   deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(3)
   /// SHA-256 of the recipient's identity public key at send time (NULL = legacy row).
   recipientIdentityDigest Bytes? @map("recipient_identity_digest")
+  /// 'undeliverable_device_changed' while awaiting the sender's re-encrypted resend.
+  undeliverableReason String? @map("undeliverable_reason")
   message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
   recipient   User      @relation(fields: [recipientId], references: [id], onDelete: Cascade)
 
@@ -200,20 +202,4 @@ model MessageAttachment {
   @@id([messageId, ref])
   @@index([ref])
   @@map("message_attachments")
-}
-
-/// Messages a sender must re-encrypt because the recipient published a new identity key.
-/// FKs (cascade) live in the SQL migration; expired after 30 days by the retention sweep.
-model ResendNeeded {
-  senderId       String   @map("sender_id") @db.Uuid
-  conversationId String   @map("conversation_id") @db.Uuid
-  clientMsgId    String   @map("client_msg_id")
-  recipientId    String   @map("recipient_id") @db.Uuid
-  reason         String   @default("identity_changed")
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-
-  @@id([senderId, conversationId, clientMsgId, recipientId])
-  @@index([createdAt])
-  @@index([recipientId])
-  @@map("resend_needed")
 }
