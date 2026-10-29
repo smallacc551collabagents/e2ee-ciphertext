@@ -39,7 +39,15 @@ export const messageSchema = z.object({
   version,
   createdAt: z.string(),
 });
-export const sendMessageRequestSchema = z.object({ clientMsgId: clientMsgIdSchema, ciphertext: capped(CIPHERTEXT_MAX_BYTES), version }).strict();
+// Optional: refs of attachments (completed by the sender in this conversation) this message carries.
+// Lets the server keep those blobs while the message is undelivered (docs/attachments-backend.md).
+export const ATTACHMENT_REFS_MAX = 10;
+export const attachmentRefSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const sendMessageRequestSchema = z.object({
+  clientMsgId: clientMsgIdSchema, ciphertext: capped(CIPHERTEXT_MAX_BYTES), version,
+  attachmentRefs: z.array(attachmentRefSchema).max(ATTACHMENT_REFS_MAX).refine((a) => new Set(a).size === a.length, "unique items").optional(),
+}).strict();
+export const deleteAccountRequestSchema = z.object({ password: z.string().min(1).max(256) }).strict();
 export const sendMessageResponseSchema = z.object({ message: messageSchema, duplicate: z.boolean() });
 export const messagePageSchema = z.object({ messages: z.array(messageSchema), nextCursor: z.string().nullable(), hasMore: z.boolean() });
 export const ackRequestSchema = z.object({ messageIds: z.array(uuidSchema).min(1).max(500).refine((a) => new Set(a).size === a.length, "unique items") }).strict();

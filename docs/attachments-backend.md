@@ -58,10 +58,23 @@ Rate limits use the shared Postgres limiter (E2EE-75) and fail open on store err
 non-auth endpoints.
 
 ## Lifecycle and garbage collection
-`pending` (expires 15 min after `upload-url`) → `complete` → `stored` (expires 30 days after completion).
-`sweepAttachments()` deletes the object then the row for anything with `expires_at < now()` (bounded,
-50 per call). It runs on ~5% of `upload-url` requests (same sampled pattern as the rate-limit cleanup)
-and is exported for a future cron. Expired rows are never served even before they are swept.
+`pending` (expires 15 min after `upload-url`) → `complete` → `stored`.
+
+**Retention (reference-aware + sliding).** A stored attachment is kept while EITHER holds:
+1. an **undelivered** message (some recipient hasn't acked) declared its ref via `attachmentRefs` on send, or
+2. its **sliding expiry** hasn't passed: `complete` sets `expires_at = now+30d`, and every successful
+   `download-url` issuance by a member extends it to `max(expires_at, now+30d)`.
+
+Only when neither holds does `sweepAttachments()` delete the row (re-checking the predicate) and then the
+blob. Pending uploads are never referenceable and keep the plain 15-minute expiry. The sweep is bounded
+(50/call) and runs on ~5% of attachment calls. `download-url` succeeds iff the caller is a member and
+(1) or (2) holds, so a blob past its expiry is still fetchable while a pending message points at it.
+
+**Client contract (`attachmentRefs`).** `POST /conversations/:id/messages` accepts an optional
+`attachmentRefs: string[]` (≤10, unique, each a 43-char base64url ref). Every ref must be an attachment
+the sender uploaded and completed in that same conversation, else `400 invalid_attachment_refs`.
+Clients that omit it still work, relying on the sliding expiry only. Links (`message_attachments`) die with
+the message, i.e. once all recipients ack it or after 30 days undelivered (docs/phase1-backend.md).
 
 ## Required configuration (Vercel backend project env; never committed)
 | Var | Value |
@@ -74,4 +87,4 @@ No new GitHub Actions secrets are needed (migrations use the existing `DATABASE_
 
 ## Known limits
 
-- **30-day blob retention.** A stored blob is deleted 30 days after upload **even if a message still references it**. After that, opening the chat shows a broken attachment — the ciphertext is gone from object storage (the Olm message and its descriptor remain, but the referenced blob no longer resolves). This is acceptable for launch; revisit with reference-aware retention (keep a blob while any undeleted message points to it) or longer/configurable TTL in a later phase.
+- **Retention.** Blobs follow reference-aware + sliding retention (above). A blob nobody downloads for 30 days after its last referencing message was delivered is deleted; reopening that message later shows a broken attachment unless the client cached the plaintext.

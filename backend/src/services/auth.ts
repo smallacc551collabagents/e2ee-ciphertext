@@ -102,3 +102,27 @@ export async function resetPassword(token: string, newPassword: string): Promise
     c.release();
   }
 }
+
+/**
+ * E2EE-72: delete an account and everything it owns, in ONE transaction. Returns the attachment
+ * refs whose blobs must be removed from object storage (done by the caller, best-effort, after commit).
+ */
+export async function deleteAccount(c: import("../database/db.js").Queryable, userId: string): Promise<string[]> {
+  // Conversations that will have no members left once this user leaves.
+  const empty = await c.query<{ id: string }>(
+    `SELECT m.conversation_id AS id FROM conversation_members m WHERE m.user_id = $1
+       AND NOT EXISTS (SELECT 1 FROM conversation_members o WHERE o.conversation_id = m.conversation_id AND o.user_id <> $1)`, [userId]);
+  const emptyIds = empty.rows.map((r) => r.id);
+  const atts = await c.query<{ ref: string }>(
+    `DELETE FROM attachments WHERE owner_user_id = $1 OR conversation_id = ANY($2::uuid[]) RETURNING ref`, [userId, emptyIds]);
+  await c.query(`DELETE FROM sessions WHERE user_id = $1`, [userId]);
+  await c.query(`DELETE FROM password_reset_tokens WHERE user_id = $1`, [userId]);
+  await c.query(`DELETE FROM one_time_prekeys WHERE user_id = $1`, [userId]);
+  await c.query(`DELETE FROM identity_keys WHERE user_id = $1`, [userId]);
+  await c.query(`DELETE FROM message_deliveries WHERE recipient_id = $1`, [userId]);
+  await c.query(`DELETE FROM messages WHERE sender_id = $1`, [userId]);
+  await c.query(`DELETE FROM conversation_members WHERE user_id = $1`, [userId]);
+  await c.query(`DELETE FROM conversations WHERE id = ANY($1::uuid[])`, [emptyIds]);
+  await c.query(`DELETE FROM users WHERE id = $1`, [userId]);
+  return atts.rows.map((r) => r.ref);
+}
