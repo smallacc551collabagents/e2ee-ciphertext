@@ -374,6 +374,9 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
     let ksDirty = false;
     if (!thread.loaded) for (const e of await texts.list(gid, undefined, 100_000)) fromText(e.id, e.seq, e.senderUserId, e.text, e.sentAt, e.clientMsgId);
     await pullToDevice().catch(() => undefined);
+    // Already-rendered messages are never re-decrypted, so ask crypto whether their session was upgraded to 'sender'
+    // (creator's direct reshare after accepting this device) and drop the badge.
+    if (forwarded.size) for (const [id, ks] of await g.keySources(gid, [...forwarded]).catch(() => new Map<string, "sender" | "forwarded">())) if (noteKeySource(forwarded, id, ks)) ksDirty = true;
     const wire: MessageWire[] = [];
     let after: string | undefined = thread.after !== undefined ? String(thread.after) : undefined;
     let unsettled: bigint | undefined; // lowest seq we must see again next time (undecryptable / still in flight)

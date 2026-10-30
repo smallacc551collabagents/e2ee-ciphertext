@@ -153,6 +153,9 @@ export interface GroupLocalState {
   /** Inbound session ids whose key came from a member other than the session's creator (unverified, Matrix-style).
    * Cleared when the creator sends the same session directly. */
   forwarded?: Record<string, true>;
+  /** Message id -> session id, only for messages that decrypted while their session was forwarded. Lets
+   * keySources() re-evaluate already-rendered messages after the creator's direct key upgrades the session. */
+  forwardedMsgs?: Record<string, string>;
 }
 export interface GroupStateStore {
   get(groupId: string): Promise<GroupLocalState | undefined>;
@@ -318,6 +321,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     let cur: GroupInfo | null | undefined; // fetched lazily, once per receive()
     const fwd = (await store.get(groupId))?.forwarded ?? {};
     const entitled: Record<string, string[]> = {};
+    const fwdMsgs: Record<string, string> = {};
     for (const dto of sorted) {
       if (dto.kind === 'member_event' || dto.kind === 'system') {
         await onMembershipChanged(groupId);
@@ -340,6 +344,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
           sentAt: dto.createdAt ?? new Date(ts).toISOString(), ...(dto.clientMsgId ? { clientMsgId: dto.clientMsgId } : {}),
         });
         out.push({ kind: 'message', ok: true, dto, sender: env.sender, plaintext: r.plaintext, keySource: fwd[r.sessionId] ? 'forwarded' : 'sender' });
+        if (fwd[r.sessionId]) fwdMsgs[dto.id] = r.sessionId;
         // Remember who was entitled to an inbound session we hold, so we can forward it to a member's accepted
         // new device (reshare / key requests) even when the original sender is offline or lost its device.
         // Only recorded when the message was sent for the current membership version (members = current list).
@@ -360,6 +365,10 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
       let dirty = false;
       for (const [sid, mem] of Object.entries(entitled)) if (!st.sessionMembers[sid]) { st.sessionMembers[sid] = mem; dirty = true; }
       if (dirty) await store.set(groupId, st);
+    }
+    if (Object.keys(fwdMsgs).length) {
+      const st = await load(groupId);
+      await store.set(groupId, { ...st, forwardedMsgs: { ...(st.forwardedMsgs ?? {}), ...fwdMsgs } });
     }
     if (missing) waiting.add(groupId);
     else waiting.delete(groupId);
@@ -407,6 +416,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     let roomKeys = 0;
     const answered: { to: DeviceAddress; groupId: string; status: 'sent' | 'refused' | 'deferred' }[] = [];
     const imported = new Set<string>();
+    const upgraded = new Set<string>();
     for (const r of res) {
       if (r.kind === 'room_key') { roomKeys++; continue; }
       if (r.kind !== 'message') continue;
@@ -415,7 +425,8 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
       if (m.t === 'org.e2ee.group.key_request' && typeof m.groupId === 'string' && typeof m.sessionId === 'string') {
         answered.push({ to: r.envelope.sender, groupId: m.groupId, status: await answer(r.envelope.sender, m) });
       } else if (m.t === 'org.e2ee.group.key_response' && typeof m.keys === 'string' && typeof m.groupId === 'string' && typeof m.sessionId === 'string'
-        && (requested.has(`${m.groupId}|${m.sessionId}`) || (waiting.has(m.groupId) && await isMember(m.groupId, r.envelope.sender.userId)))) {
+        && (requested.has(`${m.groupId}|${m.sessionId}`)
+          || ((waiting.has(m.groupId) || await isUpgrade(m, r.senderCurve25519)) && await isMember(m.groupId, r.envelope.sender.userId)))) {
         // Unsolicited responses are accepted only while we're waiting on that group and only from a current member
         // (pushed by reshare() after the sender accepted our new device; our own request may have been lost).
         const forwarded = exportedSenderKey(m.keys) !== r.senderCurve25519;
@@ -423,13 +434,37 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
         if (await a.importGroupSession(m.groupId, m.sessionId, r.senderCurve25519, m.keys)) {
           requested.delete(`${m.groupId}|${m.sessionId}`);
           imported.add(m.groupId);
+          if (!forwarded && (await store.get(m.groupId))?.forwarded?.[m.sessionId]) upgraded.add(m.groupId);
           await setForwarded(m.groupId, m.sessionId, forwarded);
+        } else if (!forwarded && (await store.get(m.groupId))?.forwarded?.[m.sessionId]) {
+          // Import reported nothing new (we already hold this index), but the creator itself vouched for the key.
+          upgraded.add(m.groupId);
+          await setForwarded(m.groupId, m.sessionId, false);
         }
       }
     }
-    for (const r of res) if (r.kind === 'room_key' && r.groupId && r.sessionId) await setForwarded(r.groupId, r.sessionId, false);
-    const retry = roomKeys ? [...new Set([...waiting, ...imported])] : [...imported];
-    return { roomKeys, answered, retry };
+    for (const r of res) if (r.kind === 'room_key' && r.groupId && r.sessionId) {
+      if ((await store.get(r.groupId))?.forwarded?.[r.sessionId]) upgraded.add(r.groupId);
+      await setForwarded(r.groupId, r.sessionId, false);
+    }
+    const retry = roomKeys ? [...new Set([...waiting, ...imported, ...upgraded])] : [...new Set([...imported, ...upgraded])];
+    return { roomKeys, answered, retry, upgraded: [...upgraded] };
+  }
+
+  /** Unsolicited response worth taking: the session creator's own device sends a session we only hold as forwarded. */
+  async function isUpgrade(m: KeyResponse, senderCurve25519: string | undefined) {
+    return !!senderCurve25519 && exportedSenderKey(m.keys) === senderCurve25519 && !!(await store.get(m.groupId))?.forwarded?.[m.sessionId];
+  }
+
+  /** Current keySource for already-decrypted messages (no decryption). Unknown ids are 'sender' (never forwarded). */
+  async function keySources(groupId: string, messageIds: readonly string[]): Promise<Map<string, KeySource>> {
+    const st = await store.get(groupId);
+    const out = new Map<string, KeySource>();
+    for (const id of messageIds) {
+      const sid = st?.forwardedMsgs?.[id];
+      out.set(id, sid && st?.forwarded?.[sid] ? 'forwarded' : 'sender');
+    }
+    return out;
   }
 
   /** Direct key from the creator clears the flag. Megolm session ids are the creator's signing key, so every message
@@ -440,7 +475,9 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     const next = st ?? { sessionMembers: {} };
     const f = { ...(next.forwarded ?? {}) };
     if (forwarded) f[sessionId] = true; else delete f[sessionId];
-    await store.set(groupId, { ...next, forwarded: f });
+    // Drop message mappings for an upgraded session: keySources() treats unmapped ids as 'sender'.
+    const msgs = forwarded ? next.forwardedMsgs : Object.fromEntries(Object.entries(next.forwardedMsgs ?? {}).filter(([, s]) => s !== sessionId));
+    await store.set(groupId, { ...next, forwarded: f, ...(msgs ? { forwardedMsgs: msgs } : {}) });
   }
 
   async function onMembershipChanged(groupId: string): Promise<void> {
@@ -535,6 +572,8 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     getPendingIdentities: g(getPendingIdentities),
     refreshMembers: g(refreshMembers),
     acceptMemberIdentity: g(acceptMemberIdentity),
+    /** Re-evaluate keySource for messages already rendered (call after receiveToDevice reports `upgraded`). */
+    keySources: g(keySources),
     /** Signal (e.g. from the app's to-device/sync layer) that users may have new devices: re-verify on next send. */
     markIdentitiesChanged: () => forgetCaches(),
     isWaiting: (id: string) => !closed && waiting.has(id),

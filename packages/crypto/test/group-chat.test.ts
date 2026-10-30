@@ -280,6 +280,39 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
     expect(dan2.groups.isWaiting(G)).toBe(false);
   });
 
+  it('g6c ordering: forward fully decrypts (not waiting), THEN the creator accepts and reshares -> upgraded to sender, incl. already-rendered', async () => {
+    const s = new FakeGroupServer();
+    const alice = await member(s, 'alice'); const bob = await member(s, 'bob'); const dan = await member(s, 'dan');
+    for (const a of ['alice', 'bob', 'dan']) for (const b of ['alice', 'bob', 'dan']) if (a < b) s.dm(a, b);
+    s.create(G, 'alice', ['bob', 'dan']);
+    await alice.send(G, 'hi'); await bob.send(G, 'yo');
+    await dan.sync(G); // everyone knows dan's first identity
+    dan.close();
+    await alice.send(G, 'u1-a');
+    expect((await bob.sync(G)).texts).toContain('u1-a');
+    s.drainToDevice('dan');
+    const dan2 = await member(s, 'dan', 'DAN2');
+    await dan2.sync(G);
+    const all = () => s.groups.get(G)!.msgs.filter((x) => x.kind === 'message');
+    const aId = all().find((x) => decodeGroupEnvelope(x.ciphertext).sender.userId === userIdFor('alice') && x.seq === all().at(-1)!.seq)!.id;
+    // step A: bob (m3) accepts and forwards; dan2 decrypts everything and stops waiting
+    await bob.groups.refreshMembers(G);
+    await bob.groups.acceptMemberIdentity(G, userIdFor('dan'));
+    const a = await dan2.sync(G);
+    expect(a.res.find((x: any) => x.dto?.id === aId)?.keySource).toBe('forwarded');
+    expect(dan2.groups.isWaiting(G)).toBe(false);
+    expect((await dan2.groups.keySources(G, [aId])).get(aId)).toBe('forwarded');
+    // step B: alice (creator) comes online, accepts, reshares directly
+    await alice.groups.refreshMembers(G);
+    await alice.groups.acceptMemberIdentity(G, userIdFor('dan'));
+    const td = await dan2.groups.receiveToDevice(s.drainToDevice('dan'));
+    expect(td.upgraded).toEqual([G]);
+    expect(td.retry).toContain(G);
+    // already-rendered message: re-evaluated without decrypting; a fresh decrypt also reports 'sender'
+    expect((await dan2.groups.keySources(G, [aId, 'never-seen'])).get(aId)).toBe('sender');
+    expect((await dan2.groups.receive(G, all())).find((x: any) => x.dto?.id === aId)).toMatchObject({ ok: true, keySource: 'sender' });
+  });
+
   it('a held inbound session is not forwarded to a member added later', async () => {
     const { s, m } = await world(['alice', 'bob', 'carol', 'dave']);
     s.create(G, 'alice', ['bob', 'carol']);
