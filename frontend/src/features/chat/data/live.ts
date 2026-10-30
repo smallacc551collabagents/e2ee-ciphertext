@@ -2,6 +2,7 @@ import { assertSameAccount } from "@/lib/session-guard";
 // Live adapter: Phase 1 backend (#13/#19) + packages/crypto (#16/#20). The frontend does
 // no key mapping: it only calls the crypto package's adapter/bridge and the HTTP API.
 // WASM loads client-side via dynamic import; keys live in IndexedDB (crypto package).
+import { noteKeySource, withBadge } from "./keySource";
 import type { BackendHttp, CryptoAdapter, DeviceIdentity, OlmAdapterOptions, PeerIdentityStore, ReceiveResult, StoredPeer } from "@e2ee/crypto";
 type Crypto = typeof import("@e2ee/crypto");
 import { chatApi } from "./http";
@@ -398,8 +399,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
         } else if (r.ok) {
           if (m.senderId === me.id) await texts.put(gid, m.seq, { id: m.id, senderUserId: r.sender.userId, senderDeviceId: r.sender.deviceId, text: r.plaintext, sentAt: m.createdAt, clientMsgId: m.clientMsgId }).catch(() => undefined);
           const ks = (r as { keySource?: "sender" | "forwarded" }).keySource;
-          if (ks === "forwarded" && !forwarded.has(m.id)) { forwarded.add(m.id); ksDirty = true; }
-          else if (ks === "sender" && forwarded.delete(m.id)) ksDirty = true;
+          if (noteKeySource(forwarded, m.id, ks)) ksDirty = true;
           fromText(m.id, m.seq, r.sender.userId, r.plaintext, m.createdAt, m.clientMsgId);
           acks.push({ id: m.id, ok: true });
         } else {
@@ -415,8 +415,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     }
     if (ksDirty || forwarded.size !== ks0) { try { localStorage.setItem(ksKey, JSON.stringify([...forwarded])); } catch { /* storage off */ } }
     for (const e of thread.entries.values()) {
-      const u = !e.view.fromMe && !e.view.system && forwarded.has(e.view.id);
-      if (!!e.view.unverifiedSender !== u) e.view = { ...e.view, unverifiedSender: u || undefined };
+      e.view = withBadge(e.view, forwarded);
     }
     return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => e.view);
   }
