@@ -142,13 +142,28 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<OlmAdap
         const others = [...new Set(userIds)].filter((u) => u !== self.userId);
         // Re-query so a replaced device is dropped and only the CURRENT published device is known. Callers skip this
         // (requery:false) only while the membership version and every member's verified identity are unchanged.
-        if (others.length && o.requery !== false) {
+        const requery = async () => {
           const ids = () => others.map((u) => new M.UserId(u));
           await machine.updateTrackedUsers(ids());
           await machine.receiveSyncChanges('[]', new M.DeviceLists(ids()), new Map());
           await flush();
-        }
-        await gate.prime?.(others);
+        };
+        if (others.length && o.requery !== false) {
+          // Latency: keys.query and the identity batch are independent round trips; run them concurrently.
+          await Promise.all([requery(), gate.prime?.(others)]);
+        } else if (others.length && o.verify) {
+          // Compare freshly published identities to the cached device list by key bytes; requery on any difference.
+          const pub = await gate.prime?.(others, { force: true });
+          let changed = !pub;
+          for (const u of others) {
+            if (changed) break;
+            const p = pub?.get(u);
+            const devs = (await machine.getUserDevices(new M.UserId(u))).devices();
+            changed = !p || devs.length !== 1 || devs.some((d) => d.deviceId.toString() !== p.deviceId
+              || (d.ed25519Key?.toBase64() ?? '') !== p.ed25519 || (d.curve25519Key?.toBase64() ?? '') !== p.curve25519);
+          }
+          if (changed) await requery();
+        } else await gate.prime?.(others);
         const trusted: string[] = [];
         const pending: string[] = [];
         for (const u of others) {

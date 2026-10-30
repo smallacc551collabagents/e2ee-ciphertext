@@ -54,17 +54,20 @@ export function withRevocationCheck(inner: IdentityGate, o: RevocationCheckOptio
     assertUserNotPending: (u) => inner.assertUserNotPending(u),
     /** Batch-refresh stale entries (one request for a whole group). Only fills the freshness cache with what the
      * server publishes; assertTrusted() still compares it to the exact peer device and records changes. */
-    async prime(userIds) {
-      const stale = [...new Set(userIds)].filter((u) => { const c = fresh.get(u); return !c || now() - c.at >= maxAge; });
-      if (!stale.length) return;
+    async prime(userIds, po) {
+      // force: ignore freshness (explicit re-verify). Change detection is by key bytes (same()), never by wire version.
+      const stale = [...new Set(userIds)].filter((u) => { const c = fresh.get(u); return po?.force || !c || now() - c.at >= maxAge; });
+      const got = new Map<string, DeviceIdentity>();
+      if (!stale.length) return got;
       let raw: Map<string, unknown>;
-      try { raw = await fetchIdentities(o.http, stale.map(usernameOf)); } catch { return; } // assertTrusted fails closed itself
+      try { raw = await fetchIdentities(o.http, stale.map(usernameOf)); } catch { return got; } // assertTrusted fails closed itself
       for (const u of stale) {
         const r = raw.get(usernameOf(u));
         if (!r) continue;
-        try { fresh.set(u, { id: decode(r, u), at: now() }); primed.add(u); } catch { /* malformed: leave stale, assertTrusted re-fetches */ }
+        try { const id = decode(r, u); fresh.set(u, { id, at: now() }); primed.add(u); got.set(u, id); } catch { /* malformed: leave stale, assertTrusted re-fetches */ }
       }
-      await inner.prime?.(userIds);
+      await inner.prime?.(userIds, po);
+      return got;
     },
     async assertTrusted(peer) {
       const c = fresh.get(peer.userId);

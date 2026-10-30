@@ -313,6 +313,22 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
     expect((await dan2.groups.receive(G, all())).find((x: any) => x.dto?.id === aId)).toMatchObject({ ok: true, keySource: 'sender' });
   });
 
+  it('silent new device (never messages the creator): non-forced refreshMembers detects it by key bytes -> pending, no keys sent', async () => {
+    const s = new FakeGroupServer();
+    const alice = await member(s, 'alice', 'ALICE1', { maxAgeMs: 300_000 }); const bob = await member(s, 'bob');
+    s.dm('alice', 'bob');
+    s.create(G, 'alice', ['bob']);
+    await alice.send(G, 'one'); await bob.sync(G);
+    await alice.send(G, 'two'); // membership + identities verified and cached
+    bob.close(); s.drainToDevice('bob');
+    await member(s, 'bob', 'BOB2'); // publishes a new identity; sends nothing to alice
+    s.drainToDevice('alice');
+    const r = await alice.groups.refreshMembers(G, { force: false });
+    expect(r.pending).toEqual([userIdFor('bob')]);
+    expect(r.identities.map((x) => x.userId)).toEqual([userIdFor('bob')]);
+    expect(s.toDevice.filter((t) => t.recipient === 'bob')).toEqual([]);
+  });
+
   it('a held inbound session is not forwarded to a member added later', async () => {
     const { s, m } = await world(['alice', 'bob', 'carol', 'dave']);
     s.create(G, 'alice', ['bob', 'carol']);

@@ -111,7 +111,7 @@ export interface IdentityGate {
   assertUserNotPending(userId: string): Promise<void>;
   assertTrusted(peer: DeviceIdentity): Promise<void>;
   /** Optional: fetch whatever assertTrusted() would need for these users in one batched round trip. */
-  prime?(userIds: readonly string[]): Promise<void>;
+  prime?(userIds: readonly string[], o?: { force?: boolean }): Promise<void | Map<string, DeviceIdentity>>;
 }
 
 export function createIdentityGate(store: PeerIdentityStore, now: () => number = Date.now): IdentityGate {
