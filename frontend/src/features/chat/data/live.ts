@@ -193,7 +193,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     await texts.put(nameConv(gid), BigInt(Date.now()), { id: `name-${gid}`, senderUserId: "local", senderDeviceId: "local", text: name, sentAt: new Date().toISOString() }).catch(() => undefined);
   }
   let migrated = false;
-  onWipe(() => { names.clear(); for (const k of Object.keys(localStorage)) if (k.startsWith("e2ee.groupName.")) localStorage.removeItem(k); });
+  onWipe(() => { names.clear(); for (const k of Object.keys(localStorage)) if ((k.startsWith("e2ee.groupName.") || k.startsWith("e2ee.keySource."))) localStorage.removeItem(k); });
   async function loadNames(groups: ConversationWire[]) {
     const { texts } = await init();
     if (!migrated) {
@@ -354,6 +354,11 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const fromMe = senderUserId === myUserId;
       add(seq, { id, ...(clientMsgId ? { clientId: clientMsgId } : {}), fromMe, ...plaintextView(text, c.toDisplayText), sentAt, status: fromMe ? "sent" : "delivered", ...(fromMe ? {} : { senderName: nameOf(senderUserId) }) });
     };
+    // keySource per message id (#81). Metadata only (no content), kept per account+group so the badge survives reloads.
+    const ksKey = `e2ee.keySource.${me.id}.${gid}`;
+    const forwarded = new Set<string>((() => { try { return JSON.parse(localStorage.getItem(ksKey) ?? "[]") as string[]; } catch { return []; } })());
+    const ks0 = forwarded.size;
+    let ksDirty = false;
     for (const e of await texts.list(gid, undefined, 100_000)) fromText(e.id, e.seq, e.senderUserId, e.text, e.sentAt, e.clientMsgId);
     await pullToDevice().catch(() => undefined);
     const wire: MessageWire[] = [];
@@ -392,6 +397,9 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
           acks.push({ id: m.id, ok: true });
         } else if (r.ok) {
           if (m.senderId === me.id) await texts.put(gid, m.seq, { id: m.id, senderUserId: r.sender.userId, senderDeviceId: r.sender.deviceId, text: r.plaintext, sentAt: m.createdAt, clientMsgId: m.clientMsgId }).catch(() => undefined);
+          const ks = (r as { keySource?: "sender" | "forwarded" }).keySource;
+          if (ks === "forwarded" && !forwarded.has(m.id)) { forwarded.add(m.id); ksDirty = true; }
+          else if (ks === "sender" && forwarded.delete(m.id)) ksDirty = true;
           fromText(m.id, m.seq, r.sender.userId, r.plaintext, m.createdAt, m.clientMsgId);
           acks.push({ id: m.id, ok: true });
         } else {
@@ -404,6 +412,11 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       }
       const ids = ackPrefix(acks);
       if (ids.length) await chatApi.ack(ids).catch(() => undefined);
+    }
+    if (ksDirty || forwarded.size !== ks0) { try { localStorage.setItem(ksKey, JSON.stringify([...forwarded])); } catch { /* storage off */ } }
+    for (const e of thread.entries.values()) {
+      const u = !e.view.fromMe && !e.view.system && forwarded.has(e.view.id);
+      if (!!e.view.unverifiedSender !== u) e.view = { ...e.view, unverifiedSender: u || undefined };
     }
     return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => e.view);
   }
