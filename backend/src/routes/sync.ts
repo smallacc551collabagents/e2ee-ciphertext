@@ -12,7 +12,8 @@ import { me, requireAuth } from "../middleware/requireAuth.js";
 import { shared } from "../utils/sharedSchema.js";
 import { SYNC_WAIT_MAX_SECONDS, syncWaitQuerySchema, type SyncWaitResponse } from "@e2ee/shared";
 
-export const SYNC = { pollMs: 1000, maxSeconds: SYNC_WAIT_MAX_SECONDS };
+// Poll tick; override with SYNC_POLL_MS (tests also set SYNC.pollMs directly).
+export const SYNC = { pollMs: Number(process.env.SYNC_POLL_MS) > 0 ? Number(process.env.SYNC_POLL_MS) : 300, maxSeconds: SYNC_WAIT_MAX_SECONDS };
 
 interface Row {
   pend: { c: string; t: string }[] | null; msg_n: string; msg_t: string; td_n: string; td_t: string;

@@ -12,7 +12,7 @@ import { membersOf } from "../services/groups.js";
 import { deleteFullyAcked, RETENTION, sweepMessages } from "../services/retention.js";
 import {
   ackRequestSchema, CIPHERTEXT_MAX_BYTES, conversationParamsSchema, createConversationRequestSchema, KEY_MAX_BYTES,
-  messagePageQuerySchema, publishKeysRequestSchema, sendMessageRequestSchema, usernameParamsSchema,
+  messagePageQuerySchema, identityBatchRequestSchema, publishKeysRequestSchema, sendMessageRequestSchema, usernameParamsSchema,
 } from "@e2ee/shared";
 
 export const LIMITS = {
@@ -196,6 +196,25 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
       userId: k.user_id, username: k.username,
       identityKey: { publicKey: enc(k.identity_key), version: k.identity_key_version },
       signedPrekey: { keyId: k.signed_prekey_id, publicKey: enc(k.signed_prekey), signature: enc(k.signed_prekey_signature), version: k.signed_prekey_version },
+    };
+  });
+
+  // Batch of the read-only identity lookup above: same visibility rules, one query.
+  app.post<{ Body: { usernames: string[] } }>("/keys/identity/batch", {
+    ...shared({ body: identityBatchRequestSchema }),
+    config: { rateLimit: { hook: "preHandler", skipOnError: true, max: 120, timeWindow: "1 minute", keyGenerator: (r) => `identity-batch:${r.user?.id ?? r.ip}` } },
+  }, async (req) => {
+    const names = [...new Set(req.body.usernames.map(normalizeUsername))];
+    const r = await q().query<{ user_id: string; username: string; identity_key: Buffer; identity_key_version: number; signed_prekey_id: number; signed_prekey: Buffer; signed_prekey_signature: Buffer; signed_prekey_version: number }>(
+      `SELECT k.*, u.username FROM identity_keys k JOIN users u ON u.id = k.user_id WHERE u.username = ANY($1::text[]) ORDER BY u.username`, [names]);
+    const found = new Set(r.rows.map((k) => k.username));
+    return {
+      identities: r.rows.map((k) => ({
+        userId: k.user_id, username: k.username,
+        identityKey: { publicKey: enc(k.identity_key), version: k.identity_key_version },
+        signedPrekey: { keyId: k.signed_prekey_id, publicKey: enc(k.signed_prekey), signature: enc(k.signed_prekey_signature), version: k.signed_prekey_version },
+      })),
+      missing: names.filter((n) => !found.has(n)),
     };
   });
 

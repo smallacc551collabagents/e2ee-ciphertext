@@ -8,7 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { setTestDb, type Queryable } from "../src/database/db.js";
 import { buildApp } from "../src/app.js";
 import { SYNC } from "../src/routes/sync.js";
-import { syncWaitResponseSchema } from "@e2ee/shared";
+import { identityBatchResponseSchema, syncWaitResponseSchema } from "@e2ee/shared";
 
 const pg = new PGlite();
 const wrap = (c: PGlite | Transaction): Queryable => ({
@@ -164,4 +164,24 @@ test("pending to-device sets toDevice", async () => {
   const c2 = await p;
   assert.equal(c2.changed, true);
   assert.equal(c2.toDevice, true);
+});
+
+// ---------- POST /keys/identity/batch (shares this file's harness) ----------
+test("identity batch: auth, validation, normalize+dedupe, missing, parity with single", async () => {
+  assert.equal((await app.inject({ method: "POST", url: "/keys/identity/batch", payload: { usernames: ["syncbob"] } })).statusCode, 401);
+  assert.equal((await call(A, "POST", "/keys/identity/batch", { usernames: [] })).statusCode, 400);
+  assert.equal((await call(A, "POST", "/keys/identity/batch", { usernames: Array.from({ length: 51 }, (_, i) => `user${i}x`) })).statusCode, 400);
+  assert.equal((await call(A, "POST", "/keys/identity/batch", { usernames: ["bad name!"] })).statusCode, 400);
+  assert.equal((await call(A, "POST", "/keys/identity/batch", { usernames: ["syncbob"], extra: 1 })).statusCode, 400);
+  await signup("synckeyless"); // user without published keys
+  const r = await call(A, "POST", "/keys/identity/batch", { usernames: ["SyncBob", "syncbob", "synccarol", "synckeyless", "nosuchuser9"] });
+  assert.equal(r.statusCode, 200);
+  const body = identityBatchResponseSchema.parse(r.json());
+  assert.deepEqual(body.identities.map((x) => x.username), ["syncbob", "synccarol"]);
+  assert.deepEqual(body.missing, ["synckeyless", "nosuchuser9"]);
+  const single = (await call(A, "GET", "/keys/identity/syncbob")).json();
+  assert.deepEqual(body.identities[0], single);
+  assert.equal((await call(A, "GET", "/keys/identity/synckeyless")).statusCode, 404); // single agrees: missing
+  // Read-only: consumes no one-time prekeys.
+  assert.equal((await call(B, "GET", "/keys/count")).json().oneTimePrekeyCount, 1);
 });

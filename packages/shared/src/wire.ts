@@ -174,3 +174,12 @@ export const syncWaitResponseSchema = z.object({
   toDevice: z.boolean(),
 });
 export type SyncWaitResponse = z.infer<typeof syncWaitResponseSchema>;
+
+// ---------- POST /keys/identity/batch ----------
+// Same visibility as GET /keys/identity/:username (any authenticated caller; read-only, consumes nothing).
+// Usernames are normalized (trim + lowercase) and deduped server-side; `missing` = no user or no keys.
+export const IDENTITY_BATCH_MAX = 50;
+export const identityBatchRequestSchema = z.object({ usernames: z.array(usernameSchema).min(1).max(IDENTITY_BATCH_MAX) }).strict();
+export const identityLookupSchema = z.object({ userId: z.string(), username: z.string(), identityKey: pubKeyBase, signedPrekey: signedPrekeyBase });
+export const identityBatchResponseSchema = z.object({ identities: z.array(identityLookupSchema), missing: z.array(z.string()) });
+export type IdentityBatchResponse = z.infer<typeof identityBatchResponseSchema>;
