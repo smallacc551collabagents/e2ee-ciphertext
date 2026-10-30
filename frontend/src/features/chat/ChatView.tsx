@@ -1,5 +1,6 @@
 "use client";
-import { onSessionEnd, bindTab } from "@/lib/session-guard";
+import { onSessionEnd, bindTab, assertSameAccount } from "@/lib/session-guard";
+import { createRealtime, createSyncWaitStream } from "@/lib/realtime";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
@@ -101,39 +102,41 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
     adapter.listConversations().then((data) => setConvos({ state: "ready", data }), () => undefined);
   }, [adapter]);
 
-  // New 1:1 chats (created by the peer) must show up live: re-fetch the conversation list every 4s and on focus.
+  // Realtime doorbell (lib/realtime): fast poll today, backend stream later. One bell drives both the
+  // conversation list (new chats, previews) and the open thread, so 1:1 and group messages appear in ~1.5s.
+  const bell = useMemo(() => createRealtime({ stream: adapter.id === "live" ? createSyncWaitStream({ guard: assertSameAccount }) : null }), [adapter]);
+  const activeRef = useRef<string | null>(null);
+  activeRef.current = activeId;
   useEffect(() => {
     if (device !== "ok" || adapter.id !== "live") return;
-    const tick = () => { if (document.visibilityState === "visible") refreshConvos(); };
-    const t = setInterval(tick, 4000);
-    const off = onSessionEnd(() => clearInterval(t));
-    window.addEventListener("focus", tick);
-    return () => { off(); clearInterval(t); window.removeEventListener("focus", tick); };
-  }, [device, adapter, refreshConvos]);
-
-  // No push yet: poll with the after-cursor on focus, reconnect, and every few seconds while visible.
-  useEffect(() => {
-    if (!activeId || adapter.id !== "live") return;
-    let busy = false;
-    const poll = async () => {
-      if (busy || document.visibilityState !== "visible") return;
-      busy = true;
+    let listBusy = false;
+    let msgBusy = false;
+    const pollList = async () => {
+      if (listBusy) return;
+      listBusy = true;
+      try { setConvos({ state: "ready", data: await adapter.listConversations() }); } catch { /* next tick retries */ } finally { listBusy = false; }
+    };
+    const pollThread = async () => {
+      const id = activeRef.current;
+      if (!id || msgBusy) return;
+      msgBusy = true;
       try {
-        const fresh = await adapter.listMessages(activeId);
+        const fresh = await adapter.listMessages(id);
+        if (activeRef.current !== id) return; // user switched chats meanwhile: don't paint the old thread
         setMsgs((s) => {
           if (s.state !== "ready") return { state: "ready", data: fresh };
           const known = new Set(fresh.map((m) => m.clientId ?? m.id));
           return { state: "ready", data: [...fresh, ...s.data.filter((m) => m.status !== "sent" && !known.has(m.clientId ?? m.id))] };
         });
-      } catch { /* keep current view; next tick retries */ } finally { busy = false; }
+      } catch { /* keep current view; next tick retries */ } finally { msgBusy = false; }
     };
-    const t = setInterval(() => void poll(), 4000);
-    const off = onSessionEnd(() => clearInterval(t)); // logout stops polling before stores close
-    window.addEventListener("focus", poll);
-    window.addEventListener("online", poll);
-    document.addEventListener("visibilitychange", poll);
-    return () => { off(); clearInterval(t); window.removeEventListener("focus", poll); window.removeEventListener("online", poll); document.removeEventListener("visibilitychange", poll); };
-  }, [activeId, adapter]);
+    const unsub = bell.subscribe((e) => {
+      if (e.conversationId && e.conversationId !== activeRef.current) { void pollList(); return; }
+      void pollThread(); void pollList();
+    });
+    const off = onSessionEnd(() => { unsub(); bell.stop(); }); // logout stops polling before stores close
+    return () => { off(); unsub(); };
+  }, [device, adapter, bell]);
 
   async function acceptIdentity() {
     if (!activeId || !adapter.acceptNewIdentity) return;
