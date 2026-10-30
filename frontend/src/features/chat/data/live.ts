@@ -590,14 +590,16 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
         // Throttled per group: safety() also runs after every send, and /keys/identity is rate-limited (429 broke sends).
         // Kept in sessionStorage so a reload doesn't re-burst the rate-limited endpoint.
         const ck = `e2ee.idCheck.${me.id}.${conversationId}`;
+        // The re-check is one batched lookup for all members (POST /keys/identity/batch, deduped GETs before it ships);
+        // between checks refreshMembers reuses the identities verified for this membership version.
         const last = Math.max(identityCheckedAt.get(conversationId) ?? 0, Number(sessionStorage.getItem(ck) ?? 0));
-        if (Date.now() - last > 60_000) {
+        const force = Date.now() - last > 60_000;
+        if (force) {
           identityCheckedAt.set(conversationId, Date.now());
           try { sessionStorage.setItem(ck, String(Date.now())); } catch { /* storage unavailable */ }
-          for (const m of conv.members) if (m.id !== me.id) { try { note([await verifier.refresh(c.userIdFor(m.username))]); } catch { /* offline / 429 */ } }
         }
         let ids: { userId: string }[];
-        try { const r = await (await gc()).refreshMembers(conversationId); groupPending.set(conversationId, r.pending); ids = r.identities; }
+        try { const r = await (await gc()).refreshMembers(conversationId, { force }); groupPending.set(conversationId, r.pending); ids = r.identities; }
         catch { ids = await (await gc()).getPendingIdentities(conversationId).catch(() => []); }
         if (!ids.length) return { digits: null, changed: false };
         const first = ids[0]!.userId;

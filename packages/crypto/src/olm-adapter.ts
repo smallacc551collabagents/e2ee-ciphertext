@@ -140,13 +140,15 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<OlmAdap
         const room = new M.RoomId(roomOf(groupId));
         if (o.rotate) await machine.invalidateGroupSession(room);
         const others = [...new Set(userIds)].filter((u) => u !== self.userId);
-        // Re-query so a replaced device is dropped and only the CURRENT published device is known.
-        if (others.length) {
+        // Re-query so a replaced device is dropped and only the CURRENT published device is known. Callers skip this
+        // (requery:false) only while the membership version and every member's verified identity are unchanged.
+        if (others.length && o.requery !== false) {
           const ids = () => others.map((u) => new M.UserId(u));
           await machine.updateTrackedUsers(ids());
           await machine.receiveSyncChanges('[]', new M.DeviceLists(ids()), new Map());
           await flush();
         }
+        await gate.prime?.(others);
         const trusted: string[] = [];
         const pending: string[] = [];
         for (const u of others) {

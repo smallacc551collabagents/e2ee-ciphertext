@@ -110,6 +110,8 @@ export interface IdentityGate {
   /** Throws IDENTITY_CHANGED if the user has an unaccepted identity change. */
   assertUserNotPending(userId: string): Promise<void>;
   assertTrusted(peer: DeviceIdentity): Promise<void>;
+  /** Optional: fetch whatever assertTrusted() would need for these users in one batched round trip. */
+  prime?(userIds: readonly string[]): Promise<void>;
 }
 
 export function createIdentityGate(store: PeerIdentityStore, now: () => number = Date.now): IdentityGate {
