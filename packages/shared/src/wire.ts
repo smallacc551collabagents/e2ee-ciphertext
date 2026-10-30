@@ -157,10 +157,14 @@ export type PublishKeysRequest = z.infer<typeof publishKeysRequestSchema>;
 
 // ---------- realtime long-poll (GET /sync/wait) ----------
 // Doorbell only: never acks or returns content. `cursor` is opaque; echo the last one you got.
+// v2 = membership state + high-water marks of pending messages / to-device already reported to the caller.
+// A v1 cursor is accepted and treated like no `since`.
 export const SYNC_WAIT_MAX_SECONDS = 25;
-export const syncCursorSchema = z.string().regex(/^v1\.[0-9]{1,9}\.[0-9]{1,15}\.[0-9]{1,15}$/);
+const n15 = "[0-9]{1,15}";
+export const syncCursorSchema = z.string().regex(new RegExp(`^v2(\\.${n15}){7}$`));
+export const syncSinceSchema = z.union([syncCursorSchema, z.string().regex(new RegExp(`^v1(\\.${n15}){3}$`))]);
 export const syncWaitQuerySchema = z.object({
-  since: syncCursorSchema.optional(),
+  since: syncSinceSchema.optional(),
   timeout: z.string().regex(/^[0-9]{1,2}$/).optional(),
 }).strict();
 export const syncWaitResponseSchema = z.object({
