@@ -123,7 +123,10 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
         setMsgs((s) => {
           if (s.state !== "ready") return { state: "ready", data: fresh };
           const known = new Set(fresh.map((m) => m.clientId ?? m.id));
-          return { state: "ready", data: [...fresh, ...s.data.filter((m) => m.status !== "sent" && !known.has(m.clientId ?? m.id))] };
+          const next = [...fresh, ...s.data.filter((m) => m.status !== "sent" && !known.has(m.clientId ?? m.id))];
+          // Views are reused when unchanged, so a wake with nothing new keeps the same state (no re-render).
+          if (next.length === s.data.length && next.every((m, i) => m === s.data[i])) return s;
+          return { state: "ready", data: next };
         });
       } catch { /* keep current view; next tick retries */ }
     });
