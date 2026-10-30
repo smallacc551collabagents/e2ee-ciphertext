@@ -253,4 +253,97 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
     expect(() => s.create(G, 'alice', ['zed'])).toThrow(expect.objectContaining({ status: 403 }));
     expect(() => s.create(G, 'alice', Array.from({ length: 50 }, (_, i) => `u${i}`))).toThrow(expect.objectContaining({ status: 409 }));
   });
+  it('member moved to a new browser while offline: another member holding the session forwards it after accepting (sender offline)', async () => {
+    const s = new FakeGroupServer();
+    const alice = await member(s, 'alice'); const bob = await member(s, 'bob'); const dan = await member(s, 'dan');
+    for (const a of ['alice', 'bob', 'dan']) for (const b of ['alice', 'bob', 'dan']) if (a < b) s.dm(a, b);
+    s.create(G, 'alice', ['bob', 'dan']);
+    await bob.send(G, 'hello'); // bob has seen dan's first identity
+    expect((await dan.sync(G)).texts).toEqual(['hello']);
+    dan.close(); // offline; his room keys sit queued for the old device
+    await alice.send(G, 'early-1');
+    await alice.send(G, 'early-2');
+    expect((await bob.sync(G)).texts).toEqual(['early-1', 'early-2']); // bob records who was entitled
+    alice.close(); // original sender offline
+    s.drainToDevice('dan'); // new identity: server drops keys queued for the old device
+    const dan2 = await member(s, 'dan', 'DAN2');
+    const before = await dan2.sync(G);
+    expect(before.texts).toEqual([]); // keys were queued for the old device only
+    expect(dan2.groups.isWaiting(G)).toBe(true);
+    await bob.groups.refreshMembers(G);
+    expect((await bob.groups.getPendingIdentities(G)).map((x) => x.userId)).toEqual([userIdFor('dan')]);
+    expect(s.toDevice.filter((t) => t.recipient === 'dan')).toEqual([]); // nothing goes out before accept
+    await bob.groups.acceptMemberIdentity(G, userIdFor('dan'));
+    const r = await dan2.sync(G);
+    expect(r.texts).toEqual(['hello', 'early-1', 'early-2']); // bob's own + alice's, forwarded by bob
+    expect(r.res.filter((x: any) => x.ok).map((x: any) => x.keySource)).toEqual(['sender', 'forwarded', 'forwarded']);
+    expect(dan2.groups.isWaiting(G)).toBe(false);
+  });
+
+  it('a held inbound session is not forwarded to a member added later', async () => {
+    const { s, m } = await world(['alice', 'bob', 'carol', 'dave']);
+    s.create(G, 'alice', ['bob', 'carol']);
+    await m.alice!.send(G, 'secret');
+    expect((await m.bob!.sync(G)).texts).toEqual(['secret']);
+    s.add(G, 'bob', 'dave');
+    await m.bob!.sync(G);
+    await m.bob!.groups.reshare(G, [userIdFor('dave')]);
+    const res = await m.dave!.groups.receive(G, s.groups.get(G)!.msgs.filter((x) => x.kind === 'message'));
+    await m.dave!.groups.receiveToDevice(s.drainToDevice('dave'));
+    const again = await m.dave!.groups.receive(G, s.groups.get(G)!.msgs.filter((x) => x.kind === 'message'));
+    expect(res.map((x: any) => x.ok)).toEqual([false]);
+    expect(again.map((x: any) => (x.ok ? x.plaintext : x.code))).toEqual(['MISSING_ROOM_KEY']);
+  });
+  it('forwarded keys: flagged, ignored when duplicated, upgraded by the sender, never downgrade a direct key', async () => {
+    const s = new FakeGroupServer();
+    const names = ['alice', 'bob', 'carol', 'dan'];
+    const m: Record<string, Awaited<ReturnType<typeof member>>> = {};
+    for (const u of names) m[u] = await member(s, u);
+    for (const a of names) for (const b of names) if (a < b) s.dm(a, b);
+    s.create(G, 'alice', ['bob', 'carol', 'dan']);
+    for (const u of ['alice', 'bob', 'carol']) { await m[u]!.send(G, `hi-${u}`); await m.dan!.sync(G); } // everyone knows dan's first identity
+    m.dan!.close();
+    await m.alice!.send(G, 'early');
+    await m.bob!.sync(G);
+    s.drainToDevice('dan');
+    const dan2 = await member(s, 'dan', 'DAN2');
+    const all = () => s.groups.get(G)!.msgs.filter((x) => x.kind === 'message');
+    const earlySid = (decodeGroupEnvelope(all().at(-1)!.ciphertext).content as any).session_id as string;
+    const earlyId = all().at(-1)!.id;
+    let imports = 0;
+    const realImport = dan2.adapter.importGroupSession.bind(dan2.adapter);
+    dan2.adapter.importGroupSession = async (g: string, sid: string, k: string, j: string) => { if (sid === earlySid) imports++; return realImport(g, sid, k, j); };
+    await dan2.sync(G);
+    const src = async () => (await dan2.groups.receive(G, all())).filter((x: any) => x.kind === 'message' && x.dto.id === earlyId).map((x: any) => (x.ok ? x.keySource : x.code))[0];
+
+    for (const u of ['bob', 'carol']) { await m[u]!.groups.refreshMembers(G); }
+    await m.bob!.groups.acceptMemberIdentity(G, userIdFor('dan'));
+    await dan2.groups.receiveToDevice(s.drainToDevice('dan'));
+    expect(await src()).toBe('forwarded');
+    expect(imports).toBe(1);
+
+    // carol still hasn't accepted dan2, so dan2 keeps waiting on carol's session; a duplicate forward from bob is ignored
+    await m.carol!.send(G, 'held-by-carol');
+    await dan2.groups.receive(G, all());
+    expect(dan2.groups.isWaiting(G)).toBe(true);
+    await m.bob!.groups.reshare(G, [userIdFor('dan')]);
+    await dan2.groups.receiveToDevice(s.drainToDevice('dan'));
+    expect(imports).toBe(1);
+    expect(await src()).toBe('forwarded');
+
+    // the original sender accepts and pushes the same session directly: upgraded
+    await m.alice!.groups.refreshMembers(G);
+    await m.alice!.groups.acceptMemberIdentity(G, userIdFor('dan'));
+    await dan2.groups.receiveToDevice(s.drainToDevice('dan'));
+    expect(imports).toBe(2);
+    expect(await src()).toBe('sender');
+
+    // a later forward never replaces the direct key
+    await dan2.groups.receive(G, all());
+    expect(dan2.groups.isWaiting(G)).toBe(true);
+    await m.bob!.groups.reshare(G, [userIdFor('dan')]);
+    await dan2.groups.receiveToDevice(s.drainToDevice('dan'));
+    expect(imports).toBe(2);
+    expect(await src()).toBe('sender');
+  }, 60_000);
 });
