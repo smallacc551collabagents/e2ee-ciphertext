@@ -25,8 +25,8 @@ const ms = (col: string) => `floor(extract(epoch FROM ${col}) * 1000)::bigint`;
 async function probe(uid: string, sinceJoinedMs: string): Promise<Row> {
   const r = await q().query<Row>(
     `WITH p AS (SELECT m.conversation_id::text AS c, max(${ms("m.created_at")}) AS t, count(*) AS k
-                  FROM message_deliveries d JOIN messages m ON m.id = d.message_id
-                 WHERE d.recipient_id = $1 AND d.delivered_at IS NULL AND d.undeliverable_reason IS NULL
+                  FROM message_deliveries d JOIN messages m ON m.id = d.message_id JOIN conversations cv ON cv.id = m.conversation_id
+                 WHERE d.recipient_id = $1 AND d.delivered_at IS NULL AND (d.undeliverable_reason IS NULL OR cv.kind = 'group')
                  GROUP BY m.conversation_id),
           td AS (SELECT count(*) AS n, coalesce(max(${ms("created_at")}), 0) AS t FROM to_device_messages WHERE recipient_id = $1),
           s AS (SELECT count(*) AS n, coalesce(sum(c.membership_version), 0) AS vsum, coalesce(max(${ms("cm.joined_at")}), 0) AS maxj
