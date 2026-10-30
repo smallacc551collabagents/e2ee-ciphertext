@@ -73,6 +73,8 @@ export interface ChatAdapter {
   safety?(conversationId: string): Promise<SafetyInfo>;
   /** Accepts the peer's new safety number, then automatically re-sends messages stranded on their old device. */
   acceptNewIdentity?(conversationId: string): Promise<void>;
+  /** Group ids whose message keys were upgraded to the sender's own (badge should clear). Returns unsubscribe. */
+  onKeysUpgraded?(cb: (groupId: string) => void): () => void;
   /** Own messages flagged undeliverable_device_changed (recipient changed device), in seq order. */
   pendingResends?(conversationId: string): Promise<{ clientId: string; messageId: string; hasText: boolean }[]>;
   /** Re-encrypt + re-send flagged messages (same clientId). Refuses (failed[]) until acceptNewIdentity. */

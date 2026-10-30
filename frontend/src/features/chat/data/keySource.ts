@@ -14,3 +14,12 @@ export function withBadge<T extends BadgeView>(v: T, forwarded: Set<string>): T 
   const u = !v.fromMe && !v.system && forwarded.has(v.id);
   return !!v.unverifiedSender === u ? v : { ...v, unverifiedSender: u || undefined };
 }
+
+/** Groups whose forwarded session crypto upgraded to 'sender' (receiveToDevice().upgraded): tells the open view to refresh. */
+export function createUpgradeNotifier() {
+  const subs = new Set<(groupId: string) => void>();
+  return {
+    subscribe(cb: (groupId: string) => void) { subs.add(cb); return () => { subs.delete(cb); }; },
+    notify(groupIds: readonly string[] | undefined) { for (const g of new Set(groupIds ?? [])) for (const cb of [...subs]) { try { cb(g); } catch { /* listener bug: ignore */ } } },
+  };
+}
