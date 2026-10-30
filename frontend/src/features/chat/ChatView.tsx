@@ -364,6 +364,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                         <div className={`flex ${m.fromMe ? "justify-end" : "justify-start"}`}>
                           <div data-testid="bubble" className={`max-w-[75%] rounded-2xl px-3 py-2 md:max-w-md ${m.fromMe ? "bg-blue-600 text-white" : "bg-white ring-1 ring-slate-200"}`}>
                             {!m.fromMe && m.senderName && <p data-testid="sender" className="text-[11px] font-semibold text-slate-500">@{m.senderName}</p>}
+                            {m.unverifiedSender && <span data-testid="unverified-sender" tabIndex={0} title="Unverified sender: this message's key was forwarded by another group member, not sent by the sender's device. It's encrypted, but its authenticity depends on that member. The badge clears once the sender's own key arrives." className="mb-0.5 inline-block rounded bg-amber-100 px-1 text-[10px] font-medium text-amber-800">Unverified sender</span>}
                             {/* Plain text only: React escapes; never dangerouslySetInnerHTML. */}
                             {m.attachment !== undefined && adapter.openAttachment
                               ? <AttachmentView descriptor={m.attachment} open={adapter.openAttachment} display={adapter.displayText ?? ((t) => t)} />

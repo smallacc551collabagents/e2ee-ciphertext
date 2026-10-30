@@ -29,6 +29,8 @@ export interface MessageView {
   system?: boolean;
   /** Group messages from others: sender's username. */
   senderName?: string;
+  /** Group message decrypted with a room key forwarded by another member, not the sender (crypto #81). */
+  unverifiedSender?: boolean;
 }
 
 /** Thrown by adapters whose backend/crypto contract isn't available yet. */
