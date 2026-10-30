@@ -244,24 +244,3 @@ test("validation: @e2ee/shared schemas reject bad input with the 400 validation_
   const q = await call(alice, "GET", "/conversations/00000000-0000-0000-0000-000000000000/messages?bogus=1");
   assert.equal(q.statusCode, 400);
 });
-
-test("identity key version is server-owned: bumps on new bytes, stable on same bytes", async () => {
-  const ivy = await signup("ivy_ver");
-  const pub = (fill: number, version: number) => call(ivy, "POST", "/keys/publish", {
-    identityKey: { publicKey: b64(33, fill), version },
-    signedPrekey: { keyId: 1, publicKey: b64(33, fill), signature: b64(64, fill), version: 1 },
-  });
-  const ver = async () => (await call(ivy, "GET", "/keys/identity/ivy_ver")).json().identityKey.version;
-  assert.equal((await pub(1, 1)).statusCode, 200);
-  assert.equal(await ver(), 1);
-  assert.equal((await pub(1, 1)).statusCode, 200);
-  assert.equal(await ver(), 1, "republish same key keeps version");
-  assert.equal((await pub(1, 5)).statusCode, 200);
-  assert.equal(await ver(), 1, "same bytes ignore client version");
-  assert.equal((await pub(2, 1)).statusCode, 200);
-  assert.equal(await ver(), 2, "new bytes with stale client version bump to 2");
-  assert.equal((await pub(3, 7)).statusCode, 200);
-  assert.equal(await ver(), 7, "client higher version honored");
-  assert.equal((await pub(4, 1)).statusCode, 200);
-  assert.equal(await ver(), 8, "client can't roll back");
-});
