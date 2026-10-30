@@ -4,6 +4,8 @@ export type MessageStatus = "sending" | "sent" | "delivered" | "read" | "failed"
 export interface ConversationView {
   id: string;
   name: string;
+  /** Groups: false while this device can't decrypt the group name yet (shown as "Encrypted group" with a lock). */
+  nameKnown?: boolean;
   preview: string;
   lastActivityAt: string; // ISO
   unread: number;

@@ -2,6 +2,7 @@ import { assertSameAccount } from "@/lib/session-guard";
 // Live adapter: Phase 1 backend (#13/#19) + packages/crypto (#16/#20). The frontend does
 // no key mapping: it only calls the crypto package's adapter/bridge and the HTTP API.
 // WASM loads client-side via dynamic import; keys live in IndexedDB (crypto package).
+import { changedKeys, groupLabel, groupsToWarm, type KeyPrint } from "./groupMeta";
 import { createUpgradeNotifier, noteKeySource, withBadge } from "./keySource";
 import type { BackendHttp, CryptoAdapter, DeviceIdentity, OlmAdapterOptions, PeerIdentityStore, ReceiveResult, StoredPeer } from "@e2ee/crypto";
 type Crypto = typeof import("@e2ee/crypto");
@@ -185,6 +186,9 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
     return ctx;
   }
 
+  const upgrades = createUpgradeNotifier();
+  const warmTried = new Map<string, number>(); // groupId -> last background fetch for a group without a decrypted name
+  const keyPrints = new Map<string, KeyPrint>(); // groupId -> members' published identity key bytes last seen
   const usernameById = new Map<string, string>();
   const remember = (v: ConversationWire) => { convos.set(v.id, v); for (const m of v.members) usernameById.set(m.id, m.username); };
   // Group names live only in the AES-GCM history store (pseudo-conversation per group), cached in memory.
@@ -192,7 +196,9 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
   const nameConv = (gid: string) => `__groupname__:${gid}`;
   const names = new Map<string, string>();
   async function saveName(gid: string, name: string) {
+    const learned = names.get(gid) !== name;
     names.set(gid, name);
+    if (learned) queueMicrotask(() => upgrades.notify([gid])); // "Encrypted group" -> real name, live
     const { texts } = await init();
     await texts.put(nameConv(gid), BigInt(Date.now()), { id: `name-${gid}`, senderUserId: "local", senderDeviceId: "local", text: name, sentAt: new Date().toISOString() }).catch(() => undefined);
   }
@@ -215,9 +221,9 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
       if (last) names.set(g.id, last.text);
     }
   }
-  const groupName = (v: ConversationWire) => names.get(v.id) || v.members.filter((m) => m.id !== me.id).map((m) => m.username).join(", ") || "Group";
+  const groupName = (v: ConversationWire) => groupLabel(names.get(v.id)).name;
   const toView = (v: ConversationWire): ConversationView => v.kind === "group"
-    ? { id: v.id, kind: "group", name: groupName(v), preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }
+    ? { id: v.id, kind: "group", ...groupLabel(names.get(v.id)), preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 }
     : { id: v.id, kind: "direct", name: peerOf(v).username, preview: "Encrypted message", lastActivityAt: v.createdAt ?? "", unread: 0 };
   const identityCheckedAt = new Map<string, number>(); // groupId -> last member identity re-check
   const inflight = new Set<string>(); // clientMsgIds this tab is sending right now
@@ -243,7 +249,6 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
     return conversations;
   }
   /** Pull Olm to-device envelopes (Megolm room keys, key requests/responses), process, then ack. Returns groups to retry. */
-  const upgrades = createUpgradeNotifier();
   const pullToDevice = () => serial("\u0000to-device", async () => {
     const { c } = await init();
     const g = await gc();
@@ -522,6 +527,10 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
       const conversations = await refreshConvos();
       void refreshStale().catch(() => undefined);
       void pullToDevice().catch(() => undefined);
+      // Groups whose name/state didn't decrypt here (e.g. new device): still fetch their messages so meta + key
+      // requests flow; the name switches live via the upgrade hook once it decrypts.
+      const unnamed = groupsToWarm(conversations.filter((v) => v.kind === "group").map((v) => v.id), (id) => names.has(id), warmTried, Date.now());
+      for (const gid of unnamed) void serial(gid, () => listGroupMessagesNow(gid)).catch(() => undefined);
       return conversations.map(toView);
     },
     onKeysUpgraded(cb: (groupId: string) => void) { return upgrades.subscribe(cb); },
@@ -600,7 +609,19 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
         // The re-check is one batched lookup for all members (POST /keys/identity/batch, deduped GETs before it ships);
         // between checks refreshMembers reuses the identities verified for this membership version.
         const last = Math.max(identityCheckedAt.get(conversationId) ?? 0, Number(sessionStorage.getItem(ck) ?? 0));
-        const force = Date.now() - last > 60_000;
+        // Identity change = different key bytes (not identityKey.version, which a new device may publish unchanged).
+        let keyMoved = false;
+        const probeKey = `probe:${conversationId}`;
+        if (Date.now() - (warmTried.get(probeKey) ?? 0) > 5_000) try {
+          warmTried.set(probeKey, Date.now());
+          const others = conv.members.filter((m) => m.id !== me.id).map((m) => m.username);
+          const r = await http.request("POST", "/keys/identity/batch", { usernames: others }) as { identities?: { username: string; identityKey?: { publicKey?: string } }[] };
+          const cur: KeyPrint = {};
+          for (const i of r.identities ?? []) if (i.identityKey?.publicKey) cur[i.username] = i.identityKey.publicKey;
+          keyMoved = changedKeys(keyPrints.get(conversationId), cur).length > 0;
+          keyPrints.set(conversationId, { ...keyPrints.get(conversationId), ...cur });
+        } catch { /* offline / rate-limited: the throttled re-check below still runs */ }
+        const force = keyMoved || Date.now() - last > 60_000;
         if (force) {
           identityCheckedAt.set(conversationId, Date.now());
           try { sessionStorage.setItem(ck, String(Date.now())); } catch { /* storage unavailable */ }
