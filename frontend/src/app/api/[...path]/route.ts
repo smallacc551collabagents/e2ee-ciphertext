@@ -9,6 +9,7 @@ import { buildDownstreamHeaders, buildUpstreamHeaders, clientIp, forwardsBody, u
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const maxDuration = 35; // GET /sync/wait long-polls up to 20-25s
 
 type Ctx = { params: Promise<{ path: string[] }> };
 

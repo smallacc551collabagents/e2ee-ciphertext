@@ -45,3 +45,37 @@ test("stream events pass through and slow the poll while connected", async () =>
   expect(seen.filter((e) => e.reason === "poll").length).toBeGreaterThanOrEqual(2);
   bell.stop();
 });
+
+test("sync/wait: bootstrap, wake, back off on an identical pending set, reset on change, stop on 404", async () => {
+  const { createSyncWaitStream } = await import("../src/lib/realtime");
+  const replies = [
+    { changed: false, cursor: "v1.1.1.1", conversations: [], toDevice: false }, // bootstrap
+    { changed: true, cursor: "v1.1.1.1", conversations: ["g"], toDevice: false },
+    { changed: true, cursor: "v1.1.1.1", conversations: ["g"], toDevice: false }, // same: undecryptable, back off
+    { changed: true, cursor: "v1.1.1.1", conversations: ["g", "h"], toDevice: false }, // new: reset
+  ];
+  const calls: number[] = []; const t0 = Date.now();
+  const fetchFn = (async (url: string) => {
+    calls.push(Date.now() - t0);
+    expect(url).toMatch(/^\/api\/sync\/wait\?/);
+    const r = replies.shift();
+    return r ? new Response(JSON.stringify(r), { status: 200 }) : new Response("", { status: 404 });
+  }) as unknown as typeof fetch;
+  const events: (string | undefined)[] = []; const states: boolean[] = [];
+  createSyncWaitStream({ fetchFn, minRepeatMs: 80, maxBackoffMs: 200 }).subscribe((id) => events.push(id), (s) => states.push(s));
+  await wait(900);
+  expect(events).toEqual(["g", "g", "h"]);
+  expect(calls).toHaveLength(5);
+  expect(calls[3]! - calls[2]!).toBeGreaterThanOrEqual(75); // backed off, no tight loop
+  expect(states).toEqual([true, false]);
+});
+
+test("sync/wait stops when the session guard trips", async () => {
+  const { createSyncWaitStream } = await import("../src/lib/realtime");
+  let n = 0;
+  const fetchFn = (async () => { n++; return new Response("{}", { status: 500 }); }) as unknown as typeof fetch;
+  const guard = () => { throw Object.assign(new Error("x"), { name: "SessionChangedError" }); };
+  createSyncWaitStream({ fetchFn, guard, minRepeatMs: 10 }).subscribe(() => undefined, () => undefined);
+  await wait(100);
+  expect(n).toBe(0);
+});

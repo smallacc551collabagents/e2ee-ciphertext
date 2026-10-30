@@ -1,6 +1,6 @@
 "use client";
-import { onSessionEnd, bindTab } from "@/lib/session-guard";
-import { createRealtime } from "@/lib/realtime";
+import { onSessionEnd, bindTab, assertSameAccount } from "@/lib/session-guard";
+import { createRealtime, createSyncWaitStream } from "@/lib/realtime";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
@@ -104,7 +104,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
 
   // Realtime doorbell (lib/realtime): fast poll today, backend stream later. One bell drives both the
   // conversation list (new chats, previews) and the open thread, so 1:1 and group messages appear in ~1.5s.
-  const bell = useMemo(() => createRealtime(), []);
+  const bell = useMemo(() => createRealtime({ stream: adapter.id === "live" ? createSyncWaitStream({ guard: assertSameAccount }) : null }), [adapter]);
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
   useEffect(() => {
