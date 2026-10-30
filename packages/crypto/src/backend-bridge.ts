@@ -160,8 +160,8 @@ export async function fetchIdentities(http: BackendHttp, usernames: readonly str
   if (!names.length) return out;
   if (!noBatch.has(http)) {
     try {
-      for (let i = 0; i < names.length; i += 100) {
-        const r = (await http.request('POST', '/keys/identity/batch', { usernames: names.slice(i, i + 100) })) as
+      for (let i = 0; i < names.length; i += 50) { // IDENTITY_BATCH_MAX (packages/shared wire.ts)
+        const r = (await http.request('POST', '/keys/identity/batch', { usernames: names.slice(i, i + 50) })) as
           { identities?: unknown } | null;
         const ids = r?.identities;
         const rows: [string, unknown][] = Array.isArray(ids)
