@@ -25,3 +25,14 @@ test("no change -> same array (no re-render)", () => {
   const rows = [ok("m0", "c0")];
   expect(mergeThread(rows, [rows[0]!])).toBe(rows);
 });
+
+test("badge-only change (keySource upgraded to sender) counts as a row change; identical content reuses the view", () => {
+  const b: { id: string; clientId: string; fromMe: boolean; status: string; text: string; unverifiedSender?: boolean } = { id: "m1", clientId: "c1", fromMe: false, status: "delivered", text: "x", unverifiedSender: true };
+  const cleared = { ...b, unverifiedSender: undefined };
+  const cur = [b];
+  const out = mergeThread(cur, [cleared]);
+  expect(out).not.toBe(cur);
+  expect(out[0]!.unverifiedSender).toBeFalsy();
+  const same = [cleared];
+  expect(mergeThread(same, [{ ...cleared }])).toBe(same);
+});

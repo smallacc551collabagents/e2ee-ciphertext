@@ -2,7 +2,7 @@ import { assertSameAccount } from "@/lib/session-guard";
 // Live adapter: Phase 1 backend (#13/#19) + packages/crypto (#16/#20). The frontend does
 // no key mapping: it only calls the crypto package's adapter/bridge and the HTTP API.
 // WASM loads client-side via dynamic import; keys live in IndexedDB (crypto package).
-import { noteKeySource, withBadge } from "./keySource";
+import { createUpgradeNotifier, noteKeySource, withBadge } from "./keySource";
 import type { BackendHttp, CryptoAdapter, DeviceIdentity, OlmAdapterOptions, PeerIdentityStore, ReceiveResult, StoredPeer } from "@e2ee/crypto";
 type Crypto = typeof import("@e2ee/crypto");
 import { chatApi } from "./http";
@@ -243,6 +243,7 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
     return conversations;
   }
   /** Pull Olm to-device envelopes (Megolm room keys, key requests/responses), process, then ack. Returns groups to retry. */
+  const upgrades = createUpgradeNotifier();
   const pullToDevice = () => serial("\u0000to-device", async () => {
     const { c } = await init();
     const g = await gc();
@@ -255,6 +256,8 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
       const r = await g.receiveToDevice(envs);
       r.retry.forEach((x) => retry.add(x));
       await http.request("POST", "/to-device/ack", { ids: page.messages.map((m) => m.id) });
+      // Creator's reshare upgraded a forwarded session: refresh that group so keySources() clears the badge live.
+      upgrades.notify((r as { upgraded?: string[] }).upgraded);
       if (!page.hasMore) break;
     }
     return retry;
@@ -521,6 +524,7 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
       void pullToDevice().catch(() => undefined);
       return conversations.map(toView);
     },
+    onKeysUpgraded(cb: (groupId: string) => void) { return upgrades.subscribe(cb); },
     listMessages(conversationId) {
       return serial(conversationId, () => listMessagesNow(conversationId));
     },

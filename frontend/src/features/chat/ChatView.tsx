@@ -132,8 +132,10 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
       if (e.conversationId && e.conversationId !== activeRef.current) { void pollList(); return; }
       void pollThread(); void pollList();
     });
-    const off = onSessionEnd(() => { unsub(); bell.stop(); }); // logout stops polling before stores close
-    return () => { off(); unsub(); };
+    // Late sender key upgraded a group's forwarded sessions: re-fetch that thread so the badge clears without a wake.
+    const unUp = adapter.onKeysUpgraded?.((gid) => { if (gid === activeRef.current) void pollThread(); else void pollList(); }) ?? (() => undefined);
+    const off = onSessionEnd(() => { unsub(); unUp(); bell.stop(); }); // logout stops polling before stores close
+    return () => { off(); unsub(); unUp(); };
   }, [device, adapter, bell]);
 
   async function acceptIdentity() {

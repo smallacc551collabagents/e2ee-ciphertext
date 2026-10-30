@@ -30,3 +30,12 @@ test("coalesce: a wake during a running fetch is not dropped, it re-runs once", 
   release(); await p;
   expect(runs).toBe(2);
 });
+
+test("upgrade notifier: receiveToDevice().upgraded groups reach subscribers once each; unsubscribe works", async () => {
+  const { createUpgradeNotifier } = await import("../src/features/chat/data/keySource");
+  const n = createUpgradeNotifier(); const got: string[] = [];
+  const off = n.subscribe((g) => got.push(g));
+  n.notify(["g1", "g1", "g2"]); n.notify(undefined); n.notify([]);
+  off(); n.notify(["g3"]);
+  expect(got).toEqual(["g1", "g2"]);
+});
