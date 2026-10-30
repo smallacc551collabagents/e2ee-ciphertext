@@ -133,7 +133,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
       void pollThread(); void pollList();
     });
     // Late sender key upgraded a group's forwarded sessions: re-fetch that thread so the badge clears without a wake.
-    const unUp = adapter.onKeysUpgraded?.((gid) => { if (gid === activeRef.current) void pollThread(); else void pollList(); }) ?? (() => undefined);
+    const unUp = adapter.onKeysUpgraded?.((gid) => { if (gid === activeRef.current) void pollThread(); void pollList(); }) ?? (() => undefined);
     const off = onSessionEnd(() => { unsub(); unUp(); bell.stop(); }); // logout stops polling before stores close
     return () => { off(); unsub(); unUp(); };
   }, [device, adapter, bell]);
@@ -282,7 +282,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                     <Avatar name={c.name} />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline justify-between gap-2">
-                        <span className="truncate text-sm font-semibold">{c.name}{c.kind === "group" && <span className="ml-1 text-[11px] font-normal text-slate-400" data-testid="group-tag">Group</span>}</span>
+                        <span className="truncate text-sm font-semibold">{c.nameKnown === false && <span aria-label="Encrypted group, waiting for key" title="Waiting for this group's key" data-testid="encrypted-group">🔒 </span>}{c.name}{c.kind === "group" && <span className="ml-1 text-[11px] font-normal text-slate-400" data-testid="group-tag">Group</span>}</span>
                         <span className={`shrink-0 text-xs ${c.unread ? "text-blue-600" : "text-slate-400"}`}>{listTime(c.lastActivityAt)}</span>
                       </span>
                       <span className="mt-0.5 flex items-center justify-between gap-2">
@@ -311,7 +311,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                 <button type="button" onClick={() => setActiveId(null)} aria-label="Back to conversations" className="rounded-md p-1 text-xl md:hidden">‹</button>
                 <Avatar name={active.name} />
                 <div>
-                  <h1 className="font-semibold">{active.name}</h1>
+                  <h1 className="font-semibold">{active.nameKnown === false && <span aria-hidden="true">🔒 </span>}{active.name}</h1>
                   <LockBadge />
                 </div>
               </div>
