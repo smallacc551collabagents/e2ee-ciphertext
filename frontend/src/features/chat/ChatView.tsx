@@ -1,5 +1,6 @@
 "use client";
 import { onSessionEnd, bindTab, assertSameAccount } from "@/lib/session-guard";
+import { mergeThread } from "./mergeThread";
 import { coalesce, createRealtime, createSyncWaitStream } from "@/lib/realtime";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
@@ -122,11 +123,8 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
         if (activeRef.current !== id) return; // user switched chats meanwhile: don't paint the old thread
         setMsgs((s) => {
           if (s.state !== "ready") return { state: "ready", data: fresh };
-          const known = new Set(fresh.map((m) => m.clientId ?? m.id));
-          const next = [...fresh, ...s.data.filter((m) => m.status !== "sent" && !known.has(m.clientId ?? m.id))];
-          // Views are reused when unchanged, so a wake with nothing new keeps the same state (no re-render).
-          if (next.length === s.data.length && next.every((m, i) => m === s.data[i])) return s;
-          return { state: "ready", data: next };
+          const next = mergeThread(s.data, fresh);
+          return next === s.data ? s : { state: "ready", data: [...next] };
         });
       } catch { /* keep current view; next tick retries */ }
     });
