@@ -161,20 +161,19 @@ test("leave + re-add: fresh joined_at, no history from first stint or gap", asyn
   assert.equal((await userMsgs(U.gcarol!, g)).length, 0);
 });
 
-test("identity change in group flags & resend in place", async () => {
+test("identity change in group does NOT flag (Megolm is identity-independent); resend is a plain duplicate", async () => {
   const v = await ver(U.galice!, g);
   const s = await gsend(U.galice!, g, "m-idc-0001", v, 61);
   assert.equal(s.statusCode, 201);
   assert.equal((await publish(U.gcarol!, 99, 7)).statusCode, 200); // carol: new device
-  assert.equal((await userMsgs(U.gcarol!, g)).length, 0);
-  const u = (await call(U.galice!, "GET", `/conversations/${g}/undeliverable`)).json().undeliverable;
-  assert.equal(u.length, 1); assert.equal(u[0].recipientId, ids.gcarol);
-  // system events are not flagged (plaintext membership lines stay visible)
+  const cm0 = await userMsgs(U.gcarol!, g);
+  assert.equal(cm0.length, 1); assert.equal(cm0[0]?.ciphertext, b64(40, 61));
+  assert.equal((await call(U.galice!, "GET", `/conversations/${g}/undeliverable`)).json().undeliverable.length, 0);
   assert.ok((await msgs(U.gcarol!, g)).some((m) => m.kind === "system"));
   const r = await gsend(U.galice!, g, "m-idc-0001", v, 62);
-  assert.equal(r.statusCode, 200); assert.equal(r.json().duplicate, false); assert.equal(r.json().message.seq, s.json().message.seq);
+  assert.equal(r.statusCode, 200); assert.equal(r.json().duplicate, true); assert.equal(r.json().message.seq, s.json().message.seq);
   const cm = await userMsgs(U.gcarol!, g);
-  assert.equal(cm.length, 1); assert.equal(cm[0]?.ciphertext, b64(40, 62));
+  assert.equal(cm.length, 1); assert.equal(cm[0]?.ciphertext, b64(40, 61));
 });
 
 test("to-device: shared-conversation only, queued, acked, dropped on identity change", async () => {
@@ -248,4 +247,39 @@ test("retention: acked group messages deleted once all members ack; to-device ex
   assert.equal((await call(fr, "GET", "/to-device")).json().messages.length, 0);
   await sweepMessages();
   assert.equal((await pg.query(`SELECT 1 FROM to_device_messages`)).rows.length, 0);
+});
+
+test("identity change does not hide unacked GROUP messages; 1:1 still flagged", async () => {
+  const al = await signup("idgalice"), bo = await signup("idgbob");
+  assert.equal((await publish(al, 61)).statusCode, 200);
+  assert.equal((await publish(bo, 62)).statusCode, 200);
+  const d = (await call(al, "POST", "/conversations", { username: "idgbob" })).json().conversation.id as string;
+  const g = (await call(al, "POST", "/groups", { members: ["idgbob"] })).json().conversation.id as string;
+  assert.equal((await gsend(al, g, "grp-00001", await ver(al, g))).statusCode, 201);
+  assert.equal((await gsend(al, g, "grp-00002", await ver(al, g))).statusCode, 201);
+  assert.equal((await call(al, "POST", `/conversations/${d}/messages`, { clientMsgId: "dm-000001", ciphertext: b64(40), version: 1 })).statusCode, 201);
+  // B "new device": new identity key.
+  assert.equal((await publish(bo, 63, 5)).statusCode, 200);
+  const gm = await userMsgs(bo, g);
+  assert.deepEqual(gm.map((m) => m.clientMsgId), ["grp-00001", "grp-00002"]);
+  assert.equal((await call(al, "GET", `/conversations/${g}/undeliverable`)).json().undeliverable.length, 0);
+  // 1:1 unchanged: hidden from B, listed for A to resend.
+  assert.equal((await userMsgs(bo, d)).length, 0);
+  assert.equal((await call(al, "GET", `/conversations/${d}/undeliverable`)).json().undeliverable.length, 1);
+  // Group messages are ackable and count as pending in /sync/wait.
+  const s = (await call(bo, "GET", "/sync/wait")).json();
+  assert.ok(s.conversations.includes(g));
+  assert.equal((await ack(bo, gm.map((m) => m.id))).json().acked, 2);
+});
+
+test("migration data fix clears flags on previously-flagged group deliveries", async () => {
+  await pg.query(`UPDATE message_deliveries d SET undeliverable_reason = 'undeliverable_device_changed' FROM messages m, conversations c
+    WHERE d.message_id = m.id AND c.id = m.conversation_id AND c.kind = 'group' AND d.delivered_at IS NULL`);
+  const sql = readFileSync(join(import.meta.dirname, "../prisma/migrations/20261030160000_clear_group_undeliverable/migration.sql"), "utf8");
+  await pg.exec(sql);
+  const r = await pg.query(`SELECT 1 FROM message_deliveries d JOIN messages m ON m.id = d.message_id JOIN conversations c ON c.id = m.conversation_id
+    WHERE c.kind = 'group' AND d.undeliverable_reason IS NOT NULL`);
+  assert.equal(r.rows.length, 0);
+  const dm = await pg.query(`SELECT 1 FROM message_deliveries WHERE undeliverable_reason IS NOT NULL`);
+  assert.ok(dm.rows.length >= 1, "1:1 flags untouched");
 });

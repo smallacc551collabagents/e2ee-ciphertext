@@ -120,7 +120,9 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
           `UPDATE message_deliveries SET undeliverable_reason = $3
             WHERE recipient_id = $1 AND delivered_at IS NULL
               AND (recipient_identity_digest IS NULL OR recipient_identity_digest <> $2)
-              AND message_id NOT IN (SELECT id FROM messages WHERE system_event IS NOT NULL)`, [uid, digest(ik), UNDELIVERABLE]);
+              AND message_id NOT IN (SELECT id FROM messages WHERE system_event IS NOT NULL)
+              -- Only 1:1 (Olm) ciphertext depends on my identity; group (Megolm) messages stay deliverable.
+              AND message_id IN (SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'direct')`, [uid, digest(ik), UNDELIVERABLE]);
         // Pending Olm to-device envelopes (room keys) for the old identity can never be decrypted: drop them;
         // senders re-share after accepting the new identity.
         if (oldIk && !Buffer.from(oldIk).equals(ik)) await c.query(`DELETE FROM to_device_messages WHERE recipient_id = $1`, [uid]);
@@ -312,7 +314,8 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     const r = await q().query<MsgRow & { delivered_at: Date | null }>(
       `SELECT m.* FROM messages m WHERE m.conversation_id = $1 AND m.seq > $2::bigint
          AND m.seq > (SELECT joined_seq FROM conversation_members WHERE conversation_id = $1 AND user_id = $4)
-         AND NOT EXISTS (SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_id = $4 AND d.undeliverable_reason IS NOT NULL)
+         AND (NOT EXISTS (SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_id = $4 AND d.undeliverable_reason IS NOT NULL)
+              OR (SELECT kind FROM conversations WHERE id = $1) = 'group')
        ORDER BY m.seq LIMIT $3`, [req.params.id, req.query.after ?? "0", limit + 1, uid]);
     const page = r.rows.slice(0, limit).map(msgDto);
     return { messages: page, nextCursor: page.length ? page[page.length - 1]?.seq : (req.query.after ?? "0"), hasMore: r.rows.length > limit };
@@ -328,6 +331,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
       `SELECT m.id, m.client_msg_id, m.seq, d.recipient_id, d.undeliverable_reason
          FROM messages m JOIN message_deliveries d ON d.message_id = m.id
         WHERE m.conversation_id = $1 AND m.sender_id = $2 AND d.undeliverable_reason IS NOT NULL AND d.delivered_at IS NULL
+          AND (SELECT kind FROM conversations WHERE id = $1) = 'direct'
         ORDER BY m.seq LIMIT 500`, [req.params.id, uid]);
     return { undeliverable: r.rows.map((x) => ({ messageId: x.id, clientMsgId: x.client_msg_id, seq: String(x.seq), recipientId: x.recipient_id, reason: x.undeliverable_reason })) };
   });
@@ -337,7 +341,8 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   }, async (req) => {
     // Scoped to recipient_id = caller, so acking others' or unknown ids is a silent no-op.
     const r = await q().query(
-      `UPDATE message_deliveries SET delivered_at = now() WHERE recipient_id = $1 AND message_id = ANY($2::uuid[]) AND delivered_at IS NULL AND undeliverable_reason IS NULL`,
+      `UPDATE message_deliveries SET delivered_at = now() WHERE recipient_id = $1 AND message_id = ANY($2::uuid[]) AND delivered_at IS NULL
+        AND (undeliverable_reason IS NULL OR message_id IN (SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'group'))`,
       [me(req).id, req.body.messageIds]);
     // Retention: drop ciphertext as soon as every recipient has acked it.
     try { await deleteFullyAcked(req.body.messageIds); } catch (e) { app.log.error({ err: { name: (e as Error)?.name } }, "ack retention delete failed"); }
