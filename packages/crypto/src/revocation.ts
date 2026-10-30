@@ -10,7 +10,7 @@
  * new ciphertext from an honest client, even if an Olm session with it already exists.
  */
 import { CryptoError, type DeviceIdentity } from './contract.js';
-import { fromBundle, usernameOf, type BackendHttp } from './backend-bridge.js';
+import { fetchIdentities, fromBundle, usernameOf, type BackendHttp } from './backend-bridge.js';
 import type { IdentityGate, PeerIdentityStore } from './peer-trust.js';
 
 /** Default freshness window for the published-identity check. */
@@ -31,6 +31,7 @@ export function withRevocationCheck(inner: IdentityGate, o: RevocationCheckOptio
   const now = o.now ?? Date.now;
   const maxAge = o.maxAgeMs ?? REVOCATION_CHECK_MS;
   const fresh = new Map<string, { id: DeviceIdentity; at: number }>();
+  const primed = new Set<string>(); // fetched by prime() for the operation in progress; counts as fresh once
 
   async function published(userId: string): Promise<DeviceIdentity | null> {
     let raw: unknown;
@@ -41,6 +42,9 @@ export function withRevocationCheck(inner: IdentityGate, o: RevocationCheckOptio
       // Fail closed: if we cannot confirm the device is still current, do not send.
       throw new CryptoError('TRANSPORT_FAILED', 'Could not confirm peer device is still published', { cause: e });
     }
+    return decode(raw, userId);
+  }
+  function decode(raw: unknown, userId: string): DeviceIdentity {
     const d = fromBundle({ ...(raw as Parameters<typeof fromBundle>[0]), oneTimePrekey: null }, userId);
     const keys = (d.deviceKeys as { keys?: Record<string, string> }).keys ?? {};
     return { userId, deviceId: d.deviceId, ed25519: keys[`ed25519:${d.deviceId}`] ?? '', curve25519: keys[`curve25519:${d.deviceId}`] ?? '' };
@@ -48,9 +52,24 @@ export function withRevocationCheck(inner: IdentityGate, o: RevocationCheckOptio
 
   return {
     assertUserNotPending: (u) => inner.assertUserNotPending(u),
+    /** Batch-refresh stale entries (one request for a whole group). Only fills the freshness cache with what the
+     * server publishes; assertTrusted() still compares it to the exact peer device and records changes. */
+    async prime(userIds) {
+      const stale = [...new Set(userIds)].filter((u) => { const c = fresh.get(u); return !c || now() - c.at >= maxAge; });
+      if (!stale.length) return;
+      let raw: Map<string, unknown>;
+      try { raw = await fetchIdentities(o.http, stale.map(usernameOf)); } catch { return; } // assertTrusted fails closed itself
+      for (const u of stale) {
+        const r = raw.get(usernameOf(u));
+        if (!r) continue;
+        try { fresh.set(u, { id: decode(r, u), at: now() }); primed.add(u); } catch { /* malformed: leave stale, assertTrusted re-fetches */ }
+      }
+      await inner.prime?.(userIds);
+    },
     async assertTrusted(peer) {
       const c = fresh.get(peer.userId);
-      if (!c || now() - c.at >= maxAge || !same(c.id, peer)) {
+      const live = primed.delete(peer.userId);
+      if (!c || (!live && now() - c.at >= maxAge) || !same(c.id, peer)) {
         fresh.delete(peer.userId);
         const cur = await published(peer.userId);
         if (!cur) throw new CryptoError('NO_DEVICE', 'Peer device is revoked (no published identity)');

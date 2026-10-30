@@ -64,7 +64,7 @@ describe('browser crypto adapter acceptance (E2EE-29)', () => {
       'identityKey.publicKey', 'identityKey.version',
       'signedPrekey.keyId', 'signedPrekey.publicKey', 'signedPrekey.signature', 'signedPrekey.version',
       'oneTimePrekeys[].keyId', 'oneTimePrekeys[].publicKey', 'oneTimePrekeys[].version',
-      'clientMsgId', 'ciphertext', 'version',
+      'clientMsgId', 'ciphertext', 'version', 'usernames[]', // POST /keys/identity/batch: public usernames only
     ]);
     const seen = new Set<string>();
     for (const b of be.bodies) for (const k of leafKeys(JSON.parse(b))) seen.add(k);

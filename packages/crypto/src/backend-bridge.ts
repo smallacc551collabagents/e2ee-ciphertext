@@ -16,6 +16,7 @@
  * self-signature and each claimed key's signature before building a session.
  * This layer only checks that decoded objects belong to the requested user.
  */
+import { IDENTITY_BATCH_MAX, identityBatchRequestSchema, identityBatchResponseSchema } from '@e2ee/shared';
 import { CryptoError, type CiphertextEnvelope, type KeyServerTransport, type ServerRequest } from './contract.js';
 
 export const WIRE_VERSION = 1;
@@ -146,6 +147,44 @@ export function fromBundle(bundle: Bundle, expectedUserId: string) {
   return { deviceId: deviceKeys.device_id, deviceKeys: deviceKeys as Json, signedPrekey: spk, oneTime };
 }
 
+/** http clients whose server answered 404 to POST /keys/identity/batch (pre-deploy backend). */
+const noBatch = new WeakSet<BackendHttp>();
+
+/**
+ * Published identities (GET /keys/identity bodies) for many users in ONE request: POST /keys/identity/batch
+ * {usernames}. Falls back to deduped parallel GETs while the server lacks the batch route (404). Missing users map
+ * to null. Values are untrusted wire data; callers verify them (fromBundle + library signature check + gate).
+ */
+export async function fetchIdentities(http: BackendHttp, usernames: readonly string[]): Promise<Map<string, unknown>> {
+  const names = [...new Set(usernames)];
+  const out = new Map<string, unknown>(names.map((n) => [n, null]));
+  if (!names.length) return out;
+  if (!noBatch.has(http)) {
+    try {
+      const byLower = new Map(names.map((n) => [n.toLowerCase(), n]));
+      for (let i = 0; i < names.length; i += IDENTITY_BATCH_MAX) {
+        const body = identityBatchRequestSchema.parse({ usernames: names.slice(i, i + IDENTITY_BATCH_MAX) });
+        const r = identityBatchResponseSchema.parse(await http.request('POST', '/keys/identity/batch', body));
+        // `missing` == 404: stays null. Server normalizes usernames, so match case-insensitively; ignore extras.
+        for (const x of r.identities) {
+          const n = byLower.get(String((x as { username?: string }).username ?? '').toLowerCase());
+          if (n !== undefined) out.set(n, x);
+        }
+      }
+      return out;
+    } catch (e) {
+      if ((e as { status?: number }).status !== 404) throw e;
+      noBatch.add(http);
+    }
+  }
+  await Promise.all(names.map(async (n) => {
+    try { out.set(n, await http.request('GET', `/keys/identity/${encodeURIComponent(n)}`)); } catch (e) {
+      if ((e as { status?: number }).status !== 404) throw e;
+    }
+  }));
+  return out;
+}
+
 /** A KeyServerTransport that speaks the Phase 1 backend API. */
 /** Stop topping up one-time prekeys once the server holds this many unused. */
 export const OTK_POOL_TARGET = 100;
@@ -189,8 +228,11 @@ export function createBackendTransport(http: BackendHttp): KeyServerTransport {
       }
       case 'keys.query': {
         const out: Record<string, Json> = {};
-        for (const u of Object.keys(b.device_keys as Json)) {
-          const d = await fetchKeys(u, false);
+        const us = Object.keys(b.device_keys as Json);
+        const raw = await fetchIdentities(http, us.map(usernameOf));
+        for (const u of us) {
+          const r = raw.get(usernameOf(u)) as Bundle | null | undefined;
+          const d = r ? fromBundle({ ...r, oneTimePrekey: null }, u) : null;
           out[u] = d ? { [d.deviceId]: d.deviceKeys } : {};
         }
         return JSON.stringify({ device_keys: out, failures: {} });

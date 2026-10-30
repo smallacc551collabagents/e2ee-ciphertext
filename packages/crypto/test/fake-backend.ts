@@ -13,6 +13,9 @@ export class FakeBackend {
   /** Test knob: deliver flagged old-device ciphertext anyway (receiver fallback text). */
   leakStale = false;
   identityFetches = 0;
+  /** POST /keys/identity/batch (Backend, after deploy); false = 404 like the pre-deploy server. */
+  batchEnabled = false;
+  batchFetches = 0;
   private canon(s: string, max: number) {
     const ok = /^[A-Za-z0-9+/]+={0,2}$/.test(s) && Buffer.from(s, 'base64').toString('base64') === s && Buffer.from(s, 'base64').length <= max;
     if (!ok) throw Object.assign(new Error('invalid_key'), { status: 400 });
@@ -61,6 +64,13 @@ export class FakeBackend {
       const id = this.ids.get(target);
       if (!id) throw Object.assign(new Error('not found'), { status: 404 });
       return { userId: `uuid-${target}`, username: target, identityKey: id.identityKey, signedPrekey: id.signedPrekey };
+    }
+    if (method === 'POST' && path === '/keys/identity/batch') {
+      if (!this.batchEnabled) throw Object.assign(new Error('not found'), { status: 404 });
+      this.batchFetches++;
+      const names: string[] = body?.usernames ?? [];
+      if (!Array.isArray(names) || names.length > 100) throw Object.assign(new Error('shape'), { status: 400 });
+      return { identities: names.filter((n) => this.ids.has(n)).map((n) => ({ userId: `uuid-${n}`, username: n, ...this.ids.get(n)! })), missing: names.filter((n) => !this.ids.has(n)) };
     }
     const m = /^\/keys\/bundle\/(.+)$/.exec(path);
     if (method === 'GET' && m) {

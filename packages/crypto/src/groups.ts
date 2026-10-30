@@ -49,7 +49,7 @@ export type ToDeviceResult =
 export interface GroupEventInput { eventId: string; sender: DeviceAddress; ts: number; content: Record<string, unknown> }
 
 export interface GroupPrimitives {
-  shareGroupKey(groupId: string, memberUserIds: readonly string[], o: { rotate: boolean; rotationMessages?: number; rotationUs?: bigint }): Promise<GroupShareResult>;
+  shareGroupKey(groupId: string, memberUserIds: readonly string[], o: { rotate: boolean; rotationMessages?: number; rotationUs?: bigint; /** false = reuse the device list verified earlier (default true) */ requery?: boolean }): Promise<GroupShareResult>;
   encryptGroup(groupId: string, plaintext: string): Promise<Record<string, unknown>>;
   decryptGroup(groupId: string, ev: GroupEventInput): Promise<GroupDecryptResult>;
   exportGroupSession(groupId: string, sessionId: string): Promise<string | null>;
@@ -226,16 +226,39 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   const requested = new Set<string>(); // `${groupId}|${sessionId}` requested by us
   const waiting = new Set<string>(); // groupIds with messages waiting for a key
   const deferred = new Map<string, { to: DeviceAddress; req: KeyRequest }[]>(); // key requests blocked by the identity gate
+  // Per-session caches (memory only). A group's member identities are re-queried only when its membership version
+  // changes, on 409 membership_changed, while a member has a pendingChange, or when to-device shows a new device.
+  const groupCache = new Map<string, GroupInfo>();
+  const verified = new Map<string, number>(); // groupId -> membershipVersion whose member devices were verified
+  const forgetCaches = (groupId?: string) => {
+    if (groupId === undefined) { groupCache.clear(); verified.clear(); return; }
+    groupCache.delete(groupId); verified.delete(groupId);
+  };
+  async function fetchGroup(groupId: string): Promise<GroupInfo> {
+    const g = await o.backend.getGroup(groupId);
+    const old = groupCache.get(groupId);
+    if (old && old.membershipVersion !== g.membershipVersion) verified.delete(groupId);
+    groupCache.set(groupId, g);
+    return g;
+  }
+  async function anyPending(members: readonly string[]): Promise<boolean> {
+    if (!o.peers) return false;
+    for (const u of members) if (u !== self.userId && (await o.peers.get(u))?.pendingChange) return true;
+    return false;
+  }
   const load = async (g: string): Promise<GroupLocalState> => (await store.get(g)) ?? { sessionMembers: {} };
 
-  async function ensureShared(g: GroupInfo): Promise<{ pending: string[]; st: GroupLocalState; recipients: DeviceAddress[] }> {
+  async function ensureShared(g: GroupInfo, force = false): Promise<{ pending: string[]; st: GroupLocalState; recipients: DeviceAddress[] }> {
     if (!g.members.includes(self.userId)) throw new CryptoError('INVALID_OPTIONS', 'Not a member of this group');
     if (g.members.length > GROUP_MAX_MEMBERS) throw new CryptoError('INVALID_OPTIONS', 'Group exceeds member cap');
     const st = await load(g.id);
     const rotate = st.sharedVersion !== g.membershipVersion;
     if (rotate) st.sharedVersion = undefined; // persisted only after delivery succeeds
+    const requery = force || rotate || verified.get(g.id) !== g.membershipVersion || await anyPending(g.members);
+    verified.delete(g.id);
     const share = await a.shareGroupKey(g.id, g.members, {
       rotate,
+      requery,
       rotationMessages: o.rotationMessages ?? GROUP_ROTATION_MESSAGES,
       rotationUs: BigInt(o.rotationMs ?? GROUP_ROTATION_MS) * 1000n,
     });
@@ -247,13 +270,14 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     }
     st.sharedVersion = g.membershipVersion;
     await store.set(g.id, st);
+    if (!share.pending.length) verified.set(g.id, g.membershipVersion); // keep re-checking while anyone is pending
     return { pending: share.pending, st, recipients: share.envelopes.map((e) => e.recipient) };
   }
 
   async function send(groupId: string, plaintext: string, clientMsgId: string = randomId()) {
     const max = o.maxRetries ?? 3;
     for (let attempt = 0; ; attempt++) {
-      const g = await o.backend.getGroup(groupId);
+      const g = groupCache.get(groupId) ?? await fetchGroup(groupId);
       const { pending, st } = await ensureShared(g);
       const content = await a.encryptGroup(groupId, plaintext);
       const sid = String(content.session_id ?? '');
@@ -267,6 +291,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
         const err = e as { status?: number; body?: { error?: string } };
         if (err.status === 409 && STALE_MEMBERSHIP_ERRORS.includes(String(err.body?.error)) && attempt < max) {
           await store.set(groupId, { ...st, sharedVersion: undefined }); // refetch + rotate
+          forgetCaches(groupId);
           continue;
         }
         throw e;
@@ -370,6 +395,15 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
 
   async function receiveToDevice(envelopes: readonly CiphertextEnvelope[]) {
     const res = await a.receiveToDevice(envelopes);
+    // A to-device message from a device other than the one we verified means that user has a new device: re-verify.
+    if (o.peers) {
+      for (const r of res) {
+        const snd = r.envelope?.sender;
+        if (!snd || snd.userId === self.userId) continue;
+        const known = await o.peers.get(snd.userId);
+        if (!known || known.identity.deviceId !== snd.deviceId || known.pendingChange) { forgetCaches(); break; }
+      }
+    }
     let roomKeys = 0;
     const answered: { to: DeviceAddress; groupId: string; status: 'sent' | 'refused' | 'deferred' }[] = [];
     const imported = new Set<string>();
@@ -410,6 +444,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   }
 
   async function onMembershipChanged(groupId: string): Promise<void> {
+    forgetCaches(groupId);
     const st = await load(groupId);
     await store.set(groupId, { ...st, sharedVersion: undefined });
   }
@@ -417,8 +452,8 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   /** After the user accepts a changed safety number: rotate+share on next send and answer deferred key requests. */
   async function reshare(groupId: string, acceptedUserIds: readonly string[] = []) {
     await onMembershipChanged(groupId);
-    const g = await o.backend.getGroup(groupId);
-    const r = await ensureShared(g);
+    const g = await fetchGroup(groupId);
+    const r = await ensureShared(g, true);
     const l = deferred.get(groupId) ?? [];
     deferred.delete(groupId);
     const statuses = [];
@@ -441,6 +476,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
 
   /** Left / removed / group deleted: drop local outbound state. */
   async function forget(groupId: string) {
+    forgetCaches(groupId);
     await store.delete(groupId);
     waiting.delete(groupId);
     deferred.delete(groupId);
@@ -464,9 +500,9 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   }
   /** Call on membership refresh / poll: re-queries member devices (TOFU for first-seen members, records changes as
    * pending), shares the current key to trusted members, and returns the pending ones. Never shares to a changed identity. */
-  async function refreshMembers(groupId: string) {
-    const g = await o.backend.getGroup(groupId);
-    const r = await ensureShared(g);
+  async function refreshMembers(groupId: string, opts: { force?: boolean } = {}) {
+    const g = await fetchGroup(groupId);
+    const r = await ensureShared(g, opts.force ?? true);
     return { pending: r.pending, identities: o.peers ? await getPendingIdentities(groupId) : [] };
   }
   /** Explicit user accept of a member's new safety number, then push every older key they are entitled to. */
@@ -481,7 +517,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   // Logout: closeCryptoSession() drops in-memory key-request state and makes this instance unusable,
   // so a later login can never send or answer with the previous user's group state.
   const untrack = trackOpen(o.storeName ?? `groups:${self.userId}`, () => {
-    closed = true; requested.clear(); waiting.clear(); deferred.clear();
+    closed = true; requested.clear(); waiting.clear(); deferred.clear(); forgetCaches();
   });
   const guard = () => {
     if (closed) throw new CryptoError('NOT_INITIALIZED', 'Group crypto is closed (logged out)');
@@ -499,6 +535,8 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     getPendingIdentities: g(getPendingIdentities),
     refreshMembers: g(refreshMembers),
     acceptMemberIdentity: g(acceptMemberIdentity),
+    /** Signal (e.g. from the app's to-device/sync layer) that users may have new devices: re-verify on next send. */
+    markIdentitiesChanged: () => forgetCaches(),
     isWaiting: (id: string) => !closed && waiting.has(id),
     close: () => { if (!closed) { closed = true; requested.clear(); waiting.clear(); deferred.clear(); } untrack(); },
   };
