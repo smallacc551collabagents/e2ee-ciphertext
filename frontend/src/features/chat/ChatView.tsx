@@ -1,6 +1,6 @@
 "use client";
 import { onSessionEnd, bindTab, assertSameAccount } from "@/lib/session-guard";
-import { createRealtime, createSyncWaitStream } from "@/lib/realtime";
+import { coalesce, createRealtime, createSyncWaitStream } from "@/lib/realtime";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
@@ -109,17 +109,14 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   activeRef.current = activeId;
   useEffect(() => {
     if (device !== "ok" || adapter.id !== "live") return;
-    let listBusy = false;
-    let msgBusy = false;
-    const pollList = async () => {
-      if (listBusy) return;
-      listBusy = true;
-      try { setConvos({ state: "ready", data: await adapter.listConversations() }); } catch { /* next tick retries */ } finally { listBusy = false; }
-    };
-    const pollThread = async () => {
+    // Wakes that arrive while a fetch is running must not be dropped (they used to be, leaving the
+    // message to the next 15s safety-net poll): coalesce them into exactly one re-run after the current one.
+    const pollList = coalesce(async () => {
+      try { setConvos({ state: "ready", data: await adapter.listConversations() }); } catch { /* next tick retries */ }
+    });
+    const pollThread = coalesce(async () => {
       const id = activeRef.current;
-      if (!id || msgBusy) return;
-      msgBusy = true;
+      if (!id) return;
       try {
         const fresh = await adapter.listMessages(id);
         if (activeRef.current !== id) return; // user switched chats meanwhile: don't paint the old thread
@@ -128,8 +125,8 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
           const known = new Set(fresh.map((m) => m.clientId ?? m.id));
           return { state: "ready", data: [...fresh, ...s.data.filter((m) => m.status !== "sent" && !known.has(m.clientId ?? m.id))] };
         });
-      } catch { /* keep current view; next tick retries */ } finally { msgBusy = false; }
-    };
+      } catch { /* keep current view; next tick retries */ }
+    });
     const unsub = bell.subscribe((e) => {
       if (e.conversationId && e.conversationId !== activeRef.current) { void pollList(); return; }
       void pollThread(); void pollList();

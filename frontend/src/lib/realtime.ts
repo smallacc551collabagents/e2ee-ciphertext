@@ -111,8 +111,8 @@ export function createSyncWaitStream(opts: { guard?: () => void; fetchFn?: typeo
             lastKey = key; repeatMs = 0;
             if (body.conversations.length) body.conversations.forEach((id) => onEvent(id));
             else onEvent();
-            // Give the UI a beat to fetch/decrypt/ack before asking again; avoids an instant identical reply.
-            await sleep(300);
+            // Re-issue immediately: the echoed cursor already covers what we were just told, so the
+            // server only wakes us for newer items. No delay after a fresh wake.
           } catch (e) {
             if (stopped || ac.signal.aborted || (e as Error)?.name === "SessionChangedError") { setUp(false); return; }
             setUp(false);
@@ -124,4 +124,16 @@ export function createSyncWaitStream(opts: { guard?: () => void; fetchFn?: typeo
       return () => { stopped = true; ac.abort(); };
     },
   };
+}
+
+/** Wrap an async job so overlapping calls never get lost: while it runs, further calls collapse into one re-run. */
+export function coalesce(job: () => Promise<void>): () => Promise<void> {
+  let running: Promise<void> | null = null;
+  let again = false;
+  const run = async (): Promise<void> => {
+    if (running) { again = true; return running; }
+    running = (async () => { try { do { again = false; await job(); } while (again); } finally { running = null; } })();
+    return running;
+  };
+  return run;
 }
