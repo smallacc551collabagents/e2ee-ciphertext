@@ -93,6 +93,7 @@ test("new 1:1 conversation wakes the peer mid-wait", async () => {
   assert.equal(r.changed, true);
   assert.deepEqual(r.conversations, [conv]);
   assert.notEqual(r.cursor, cursorB);
+  assert.match(r.cursor, /^v2\./);
   cursorB = r.cursor;
 });
 
@@ -103,16 +104,34 @@ test("message arriving mid-wait wakes B; wait does not consume", async () => {
   assert.equal((await send(A, conv, "msg-00001")).statusCode, 201);
   const r = await p;
   assert.ok(Date.now() - t0 < 1500);
-  assert.deepEqual(r, { changed: true, cursor: cursorB, conversations: [conv], toDevice: false });
-  // Not acked: message still fetchable, and the next wait returns immediately.
+  assert.equal(r.changed, true);
+  assert.deepEqual(r.conversations, [conv]);
+  assert.equal(r.toDevice, false);
+  // Not acked: still fetchable.
   const m = (await call(B, "GET", `/conversations/${conv}/messages`)).json().messages;
   assert.equal(m.length, 1);
+  // Without since: immediate, lists all pending.
+  const boot = await wait(B);
+  assert.deepEqual({ changed: boot.changed, conversations: boot.conversations }, { changed: true, conversations: [conv] });
+  // v1 cursor is treated like no since.
+  assert.equal((await wait(B, "?since=v1.1.0.0&timeout=5")).changed, true);
+  // Already-reported pending does NOT wake (no hot loop).
   const t1 = Date.now();
-  assert.equal((await wait(B, `?since=${cursorB}&timeout=5`)).changed, true);
-  assert.ok(Date.now() - t1 < 500, "immediate when pending");
-  // After ack: quiet again.
-  assert.equal((await call(B, "POST", "/messages/ack", { messageIds: [m[0].id] })).statusCode, 200);
-  assert.equal((await wait(B, `?since=${cursorB}&timeout=1`)).changed, false);
+  const quiet = await wait(B, `?since=${r.cursor}&timeout=1`);
+  assert.equal(quiet.changed, false);
+  assert.ok(Date.now() - t1 >= 900, "held, not instant");
+  // New message while one is still pending wakes.
+  const p2 = wait(B, `?since=${quiet.cursor}&timeout=5`);
+  await new Promise((res) => setTimeout(res, 400));
+  assert.equal((await send(A, conv, "msg-00001b")).statusCode, 201);
+  const r2 = await p2;
+  assert.equal(r2.changed, true);
+  assert.deepEqual(r2.conversations, [conv]);
+  // After ack of everything: quiet.
+  const m2 = (await call(B, "GET", `/conversations/${conv}/messages`)).json().messages;
+  assert.equal((await call(B, "POST", "/messages/ack", { messageIds: m2.map((x: { id: string }) => x.id) })).statusCode, 200);
+  assert.equal((await wait(B, `?since=${r2.cursor}&timeout=1`)).changed, false);
+  cursorB = (await wait(B)).cursor;
 });
 
 test("sender is not woken by own message; other users never see it", async () => {
@@ -136,4 +155,13 @@ test("pending to-device sets toDevice", async () => {
   assert.equal(c.toDevice, true);
   assert.deepEqual(c.conversations, []);
   assert.equal((await wait(B, `?since=${cursorB}&timeout=1`)).toDevice, false);
+  // Already-reported to-device does not wake; a newer one does.
+  const quiet = await wait(C, `?since=${c.cursor}&timeout=1`);
+  assert.equal(quiet.changed, false);
+  const p = wait(C, `?since=${quiet.cursor}&timeout=5`);
+  await new Promise((res) => setTimeout(res, 400));
+  assert.ok((await call(A, "POST", "/to-device", { messages: [{ recipient: "synccarol", ciphertext: b64(40, 9), type: 1, version: 1 }] })).statusCode < 300);
+  const c2 = await p;
+  assert.equal(c2.changed, true);
+  assert.equal(c2.toDevice, true);
 });
