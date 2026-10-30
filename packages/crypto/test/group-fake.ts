@@ -97,14 +97,14 @@ export class FakeGroupServer {
 }
 
 let run = 0;
-export async function member(s: FakeGroupServer, u: string, dev = `${u.toUpperCase()}1`, opts: { rotationMessages?: number; storeName?: string; state?: import("../src/index.js").GroupStateStore } = {}) {
+export async function member(s: FakeGroupServer, u: string, dev = `${u.toUpperCase()}1`, opts: { rotationMessages?: number; storeName?: string; state?: import("../src/index.js").GroupStateStore; maxAgeMs?: number } = {}) {
   const storeName = opts.storeName ?? `${u}-${dev}-grp-${++run}`;
   const peers = new Map<string, StoredPeer>();
   const store = { get: async (k: string) => peers.get(k), set: async (k: string, v: StoredPeer) => void peers.set(k, v) };
   const http = s.keys.http(u);
   const adapter = await createOlmAdapter({
     userId: userIdFor(u), deviceId: dev, transport: createBackendTransport(http), storeName,
-    identityGate: withRevocationCheck(createIdentityGate(store), { http, store, maxAgeMs: 0 }),
+    identityGate: withRevocationCheck(createIdentityGate(store), { http, store, maxAgeMs: opts.maxAgeMs ?? 0 }),
   });
   await adapter.sync();
   // Device replaced: undelivered to-device messages for the old device are dropped (contract).

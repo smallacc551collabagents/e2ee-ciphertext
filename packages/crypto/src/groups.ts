@@ -49,7 +49,7 @@ export type ToDeviceResult =
 export interface GroupEventInput { eventId: string; sender: DeviceAddress; ts: number; content: Record<string, unknown> }
 
 export interface GroupPrimitives {
-  shareGroupKey(groupId: string, memberUserIds: readonly string[], o: { rotate: boolean; rotationMessages?: number; rotationUs?: bigint; /** false = reuse the device list verified earlier (default true) */ requery?: boolean }): Promise<GroupShareResult>;
+  shareGroupKey(groupId: string, memberUserIds: readonly string[], o: { rotate: boolean; rotationMessages?: number; rotationUs?: bigint; /** false = reuse the device list verified earlier (default true) */ requery?: boolean; /** with requery:false: one batched identity fetch (ignoring freshness); any key-byte mismatch with the cached device list forces a requery */ verify?: boolean }): Promise<GroupShareResult>;
   encryptGroup(groupId: string, plaintext: string): Promise<Record<string, unknown>>;
   decryptGroup(groupId: string, ev: GroupEventInput): Promise<GroupDecryptResult>;
   exportGroupSession(groupId: string, sessionId: string): Promise<string | null>;
@@ -251,7 +251,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   }
   const load = async (g: string): Promise<GroupLocalState> => (await store.get(g)) ?? { sessionMembers: {} };
 
-  async function ensureShared(g: GroupInfo, force = false): Promise<{ pending: string[]; st: GroupLocalState; recipients: DeviceAddress[] }> {
+  async function ensureShared(g: GroupInfo, force = false, verify = false): Promise<{ pending: string[]; st: GroupLocalState; recipients: DeviceAddress[] }> {
     if (!g.members.includes(self.userId)) throw new CryptoError('INVALID_OPTIONS', 'Not a member of this group');
     if (g.members.length > GROUP_MAX_MEMBERS) throw new CryptoError('INVALID_OPTIONS', 'Group exceeds member cap');
     const st = await load(g.id);
@@ -262,6 +262,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     const share = await a.shareGroupKey(g.id, g.members, {
       rotate,
       requery,
+      verify,
       rotationMessages: o.rotationMessages ?? GROUP_ROTATION_MESSAGES,
       rotationUs: BigInt(o.rotationMs ?? GROUP_ROTATION_MS) * 1000n,
     });
@@ -539,7 +540,9 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
    * pending), shares the current key to trusted members, and returns the pending ones. Never shares to a changed identity. */
   async function refreshMembers(groupId: string, opts: { force?: boolean } = {}) {
     const g = await fetchGroup(groupId);
-    const r = await ensureShared(g, opts.force ?? true);
+    // Non-forced refresh still re-verifies every member's published identity (one batched POST): a member who moved
+    // to a new browser must surface as pending even if they never message us (no other trigger fires).
+    const r = await ensureShared(g, opts.force ?? true, true);
     return { pending: r.pending, identities: o.peers ? await getPendingIdentities(groupId) : [] };
   }
   /** Explicit user accept of a member's new safety number, then push every older key they are entitled to. */
