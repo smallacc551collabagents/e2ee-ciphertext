@@ -66,7 +66,7 @@ const isSyncWait = (x: unknown): x is SyncWait => {
 /**
  * GET /api/sync/wait (backend #78) long-poll as a RealtimeStream. Read-only doorbell: it never acks.
  * Loops right after each response. Messages we can't decrypt yet stay pending server-side, so the same
- * pending set comes back immediately; then we back off 2s -> 15s, resetting as soon as the set changes.
+ * pending set could come back (the server holds 25s since #80); as a safety net we back off 2s -> 15s, resetting as soon as the set changes.
  * Errors/404 report onState(false) so the bell falls back to fast polling, and retry with backoff
  * (404 = endpoint absent: give up for this page). `guard` throws on logout/account change (#74/#75).
  */
@@ -98,9 +98,9 @@ export function createSyncWaitStream(opts: { guard?: () => void; fetchFn?: typeo
             if (!isSyncWait(body)) throw new Error("bad sync/wait body");
             errMs = 0;
             setUp(true);
-            const bootstrap = cursor === undefined;
-            cursor = body.cursor;
-            if (bootstrap || !body.changed) { lastKey = ""; repeatMs = 0; continue; }
+            cursor = body.cursor; // opaque (v2 since #80): always echo the last one as `since`
+            // First call (no `since`) returns everything pending at once; treat it like any other wake.
+            if (!body.changed) { lastKey = ""; repeatMs = 0; continue; }
             const key = `${[...body.conversations].sort().join(",")}|${body.toDevice}|${body.cursor}`;
             if (key === lastKey) {
               // Same pending set again (e.g. a message waiting for its key): don't spin, back off.
