@@ -277,7 +277,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
             <ul className="space-y-1 pb-2">
               {filtered.map((c) => (
                 <li key={c.id}>
-                  <button type="button" onClick={() => setActiveId(c.id)} aria-current={c.id === activeId ? "true" : undefined}
+                  <button type="button" data-conversation-id={c.id} onClick={() => setActiveId(c.id)} aria-current={c.id === activeId ? "true" : undefined}
                     className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left ${c.id === activeId ? "bg-blue-50" : "hover:bg-slate-50"}`}>
                     <Avatar name={c.name} />
                     <span className="min-w-0 flex-1">
