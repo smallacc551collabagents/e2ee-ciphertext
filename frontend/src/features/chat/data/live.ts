@@ -128,7 +128,10 @@ export function assertMayOpen(state: DeviceState, confirmed: boolean): void {
 
 export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
   const serial = keyedSerial();
-  const threads = new Map<string, { entries: Map<string, { seq: bigint; view: MessageView }> }>();
+  // Per open thread: decrypted views, plus (after the first load) `after` = highest seq such that everything at or below it
+// is settled, so a wake only fetches newer messages. Never advanced past a message we couldn't decrypt yet.
+type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded?: boolean; after?: bigint; hidden?: Set<string> };
+  const threads = new Map<string, Thread>();
   const peers = idbKv<StoredPeer>(`${storeNameFor(me.id)}-peers`);
   const convos = new Map<string, ConversationWire>();
   const changed = new Map<string, DeviceIdentity>(); // peer userId -> new published identity
@@ -335,14 +338,23 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     return view;
   }
 
+  /** Move the thread's fetch cursor to the newest fetched seq, but never past `unsettled` (kept for re-fetch). */
+  function advance(thread: Thread, wire: MessageWire[], unsettled: bigint | undefined) {
+    thread.loaded = true;
+    let top = thread.after ?? 0n;
+    for (const m of wire) { const b = BigInt(m.seq); if (b > top) top = b; }
+    if (unsettled !== undefined && unsettled - 1n < top) top = unsettled - 1n;
+    if (thread.after === undefined || top > thread.after || unsettled !== undefined) thread.after = top < 0n ? 0n : top;
+  }
+
   async function listGroupMessagesNow(gid: string): Promise<MessageView[]> {
     const { c, texts, verifier } = await init();
     const g = await gc();
     const myUserId = c.userIdFor(me.username);
-    const thread = threads.get(gid) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
+    const thread: Thread = threads.get(gid) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
     threads.set(gid, thread);
     const add = (seq: string, view: MessageView) => { if (!thread.entries.has(view.id) || thread.entries.get(view.id)!.view.status === "failed") thread.entries.set(view.id, { seq: BigInt(seq), view }); };
-    const hidden = new Set<string>(); // decrypted in-group meta messages: known, not rendered
+    const hidden = (thread.hidden ??= new Set<string>()); // decrypted in-group meta messages: known, not rendered
     const nameOf = (cryptoUserId: string) => { for (const u of usernameById.values()) if (c.userIdFor(u) === cryptoUserId) return u; return undefined; };
     const fromText = (id: string, seq: string, senderUserId: string, text: string, sentAt: string, clientMsgId?: string) => {
       if (text.startsWith(SYSTEM_PREFIX)) {
@@ -360,10 +372,12 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     const forwarded = new Set<string>((() => { try { return JSON.parse(localStorage.getItem(ksKey) ?? "[]") as string[]; } catch { return []; } })());
     const ks0 = forwarded.size;
     let ksDirty = false;
-    for (const e of await texts.list(gid, undefined, 100_000)) fromText(e.id, e.seq, e.senderUserId, e.text, e.sentAt, e.clientMsgId);
+    if (!thread.loaded) for (const e of await texts.list(gid, undefined, 100_000)) fromText(e.id, e.seq, e.senderUserId, e.text, e.sentAt, e.clientMsgId);
     await pullToDevice().catch(() => undefined);
     const wire: MessageWire[] = [];
-    let after: string | undefined;
+    let after: string | undefined = thread.after !== undefined ? String(thread.after) : undefined;
+    let unsettled: bigint | undefined; // lowest seq we must see again next time (undecryptable / still in flight)
+    const hold = (seq: string) => { const b = BigInt(seq); if (unsettled === undefined || b < unsettled) unsettled = b; };
     for (let i = 0; i < 20; i++) {
       const page = await chatApi.listMessages(gid, after);
       wire.push(...page.messages);
@@ -376,7 +390,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       if (known.has(m.id) || hidden.has(m.id)) continue;
       // Own message not (yet) in local history: in flight from this tab -> skip; else decrypt it and only call it
       // "another session" if the envelope's device isn't this one.
-      if (m.kind !== "system" && m.senderId === me.id && inflight.has(m.clientMsgId)) continue;
+      if (m.kind !== "system" && m.senderId === me.id && inflight.has(m.clientMsgId)) { hold(m.seq); continue; }
       pending.push(m);
     }
     if (pending.length) {
@@ -406,6 +420,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
           if (m.senderId === me.id) { add(m.seq, { id: m.id, clientId: m.clientMsgId, fromMe: true, text: "Sent from another session", sentAt: m.createdAt, status: "sent" }); acks.push({ id: m.id, ok: true }); continue; }
           const su = usernameById.get(m.senderId);
           if (su) void verifier.refresh(c.userIdFor(su)).then((x) => note([x])).catch(() => undefined); // sender's device may have changed
+          hold(m.seq);
           add(m.seq, { id: m.id, fromMe: false, text: r.code === "MISSING_ROOM_KEY" ? "Waiting for this message’s key from the sender…" : "Unable to decrypt this message", sentAt: m.createdAt, status: "failed", senderName: usernameById.get(m.senderId) });
           acks.push({ id: m.id, ok: false });
         }
@@ -413,6 +428,7 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       const ids = ackPrefix(acks);
       if (ids.length) await chatApi.ack(ids).catch(() => undefined);
     }
+    advance(thread, wire, unsettled);
     if (ksDirty || forwarded.size !== ks0) { try { localStorage.setItem(ksKey, JSON.stringify([...forwarded])); } catch { /* storage off */ } }
     for (const e of thread.entries.values()) {
       e.view = withBadge(e.view, forwarded);
@@ -449,17 +465,17 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
     if (convos.get(conversationId)?.kind === "group") return listGroupMessagesNow(conversationId);
     const { c, adapter, verifier, texts } = await init();
     const myUserId = c.userIdFor(me.username);
-    const thread = threads.get(conversationId) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
+    const thread: Thread = threads.get(conversationId) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
     threads.set(conversationId, thread);
     const add = (seq: string, view: MessageView) => { if (!thread.entries.has(view.id)) thread.entries.set(view.id, { seq: BigInt(seq), view }); };
-    const local = await texts.list(conversationId, undefined, 100_000);
+    const local = thread.loaded ? [] : await texts.list(conversationId, undefined, 100_000);
     const known = new Set(local.map((e) => e.id));
     for (const e of local) {
       const fromMe = e.senderUserId === myUserId;
       add(e.seq, { id: e.id, ...(e.clientMsgId ? { clientId: e.clientMsgId } : {}), fromMe, ...plaintextView(e.text, c.toDisplayText), sentAt: e.sentAt, status: fromMe ? "sent" : "delivered" });
     }
     const wire: MessageWire[] = [];
-    let after: string | undefined;
+    let after: string | undefined = thread.after !== undefined ? String(thread.after) : undefined;
     for (let i = 0; i < 20; i++) {
       const page = await chatApi.listMessages(conversationId, after);
       wire.push(...page.messages);
@@ -482,6 +498,8 @@ export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
       });
       note(await verifier.onReceiveResults(results));
     }
+    // 1:1 entries (incl. failed ones) are never re-processed, so every fetched message is settled.
+    advance(thread, wire, undefined);
     // Own messages the server flagged undeliverable (recipient replaced its device): show as not delivered.
     const flagged = new Set((await resender().pendingResends(conversationId).catch(() => [])).map((p) => p.clientMsgId));
     for (const e of thread.entries.values()) {
