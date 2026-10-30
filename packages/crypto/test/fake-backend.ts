@@ -70,7 +70,7 @@ export class FakeBackend {
       this.batchFetches++;
       const names: string[] = body?.usernames ?? [];
       if (!Array.isArray(names) || names.length > 100) throw Object.assign(new Error('shape'), { status: 400 });
-      return { identities: names.filter((n) => this.ids.has(n)).map((n) => ({ userId: `uuid-${n}`, username: n, ...this.ids.get(n)! })) };
+      return { identities: names.filter((n) => this.ids.has(n)).map((n) => ({ userId: `uuid-${n}`, username: n, ...this.ids.get(n)! })), missing: names.filter((n) => !this.ids.has(n)) };
     }
     const m = /^\/keys\/bundle\/(.+)$/.exec(path);
     if (method === 'GET' && m) {

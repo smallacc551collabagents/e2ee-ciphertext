@@ -16,6 +16,7 @@
  * self-signature and each claimed key's signature before building a session.
  * This layer only checks that decoded objects belong to the requested user.
  */
+import { IDENTITY_BATCH_MAX, identityBatchRequestSchema, identityBatchResponseSchema } from '@e2ee/shared';
 import { CryptoError, type CiphertextEnvelope, type KeyServerTransport, type ServerRequest } from './contract.js';
 
 export const WIRE_VERSION = 1;
@@ -160,14 +161,15 @@ export async function fetchIdentities(http: BackendHttp, usernames: readonly str
   if (!names.length) return out;
   if (!noBatch.has(http)) {
     try {
-      for (let i = 0; i < names.length; i += 50) { // IDENTITY_BATCH_MAX (packages/shared wire.ts)
-        const r = (await http.request('POST', '/keys/identity/batch', { usernames: names.slice(i, i + 50) })) as
-          { identities?: unknown } | null;
-        const ids = r?.identities;
-        const rows: [string, unknown][] = Array.isArray(ids)
-          ? (ids as { username?: string }[]).map((x) => [String(x?.username ?? ''), x])
-          : Object.entries((ids ?? {}) as Record<string, unknown>);
-        for (const [n, v] of rows) if (out.has(n)) out.set(n, v ?? null); // ignore names we did not ask for
+      const byLower = new Map(names.map((n) => [n.toLowerCase(), n]));
+      for (let i = 0; i < names.length; i += IDENTITY_BATCH_MAX) {
+        const body = identityBatchRequestSchema.parse({ usernames: names.slice(i, i + IDENTITY_BATCH_MAX) });
+        const r = identityBatchResponseSchema.parse(await http.request('POST', '/keys/identity/batch', body));
+        // `missing` == 404: stays null. Server normalizes usernames, so match case-insensitively; ignore extras.
+        for (const x of r.identities) {
+          const n = byLower.get(String((x as { username?: string }).username ?? '').toLowerCase());
+          if (n !== undefined) out.set(n, x);
+        }
       }
       return out;
     } catch (e) {

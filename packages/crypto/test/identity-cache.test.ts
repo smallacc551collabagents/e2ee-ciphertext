@@ -79,7 +79,7 @@ describe('group send: cached member identities, batched lookups', () => {
         seen.push(`${method} ${path}`);
         if (path === '/keys/identity/batch') {
           if (!batch) throw Object.assign(new Error('nf'), { status: 404 });
-          return { identities: body.usernames.filter((u: string) => u !== 'zed').map((u: string) => ({ username: u, k: 1 })).concat([{ username: 'evil', k: 2 }]) };
+          return { identities: body.usernames.filter((u: string) => u !== 'zed').map((u: string) => ({ userId: `id-${u}`, username: u, identityKey: { publicKey: 'AAAA', version: 1 }, signedPrekey: { keyId: 1, publicKey: 'AAAA', signature: 'AAAA', version: 1 } })).concat([{ userId: 'x', username: 'evil', identityKey: { publicKey: 'AAAA', version: 1 }, signedPrekey: { keyId: 1, publicKey: 'AAAA', signature: 'AAAA', version: 1 } }]), missing: body.usernames.filter((u: string) => u === 'zed') };
         }
         if (path.endsWith('/zed')) throw Object.assign(new Error('nf'), { status: 404 });
         return { username: path.split('/').pop(), k: 1 };
@@ -97,5 +97,21 @@ describe('group send: cached member identities, batched lookups', () => {
     seen.length = 0;
     await fetchIdentities(h, ['bob']);
     expect(seen).toEqual(['GET /keys/identity/bob']); // 404 remembered per client
+  });
+});
+
+describe('fetchIdentities chunking (PR #87 contract)', () => {
+  it('chunks at IDENTITY_BATCH_MAX=50, maps missing to null, validates with shared schemas', async () => {
+    const calls: number[] = [];
+    const http = { async request(_m: string, _p: string, body?: unknown) {
+      const u = (body as { usernames: string[] }).usernames; calls.push(u.length);
+      const have = u.filter((n) => !n.endsWith('x'));
+      return { identities: have.map((n) => ({ userId: `id-${n}`, username: n.toUpperCase(), identityKey: { publicKey: 'AAAA', version: 1 }, signedPrekey: { keyId: 1, publicKey: 'AAAA', signature: 'AAAA', version: 1 } })), missing: u.filter((n) => n.endsWith('x')) };
+    } };
+    const names = Array.from({ length: 120 }, (_, i) => `user${i}${i === 7 ? 'x' : ''}`);
+    const r = await fetchIdentities(http as never, [...names, names[0]!]);
+    expect(calls).toEqual([50, 50, 20]);
+    expect(r.get('user7x')).toBeNull();
+    expect(r.get('user8')).not.toBeNull();
   });
 });
