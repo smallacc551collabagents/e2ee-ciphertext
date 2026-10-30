@@ -253,4 +253,44 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
     expect(() => s.create(G, 'alice', ['zed'])).toThrow(expect.objectContaining({ status: 403 }));
     expect(() => s.create(G, 'alice', Array.from({ length: 50 }, (_, i) => `u${i}`))).toThrow(expect.objectContaining({ status: 409 }));
   });
+  it('member moved to a new browser while offline: another member holding the session forwards it after accepting (sender offline)', async () => {
+    const s = new FakeGroupServer();
+    const alice = await member(s, 'alice'); const bob = await member(s, 'bob'); const dan = await member(s, 'dan');
+    for (const a of ['alice', 'bob', 'dan']) for (const b of ['alice', 'bob', 'dan']) if (a < b) s.dm(a, b);
+    s.create(G, 'alice', ['bob', 'dan']);
+    await bob.send(G, 'hello'); // bob has seen dan's first identity
+    expect((await dan.sync(G)).texts).toEqual(['hello']);
+    dan.close(); // offline; his room keys sit queued for the old device
+    await alice.send(G, 'early-1');
+    await alice.send(G, 'early-2');
+    expect((await bob.sync(G)).texts).toEqual(['early-1', 'early-2']); // bob records who was entitled
+    alice.close(); // original sender offline
+    s.drainToDevice('dan'); // new identity: server drops keys queued for the old device
+    const dan2 = await member(s, 'dan', 'DAN2');
+    const before = await dan2.sync(G);
+    expect(before.texts).toEqual([]); // keys were queued for the old device only
+    expect(dan2.groups.isWaiting(G)).toBe(true);
+    await bob.groups.refreshMembers(G);
+    expect((await bob.groups.getPendingIdentities(G)).map((x) => x.userId)).toEqual([userIdFor('dan')]);
+    expect(s.toDevice.filter((t) => t.recipient === 'dan')).toEqual([]); // nothing goes out before accept
+    await bob.groups.acceptMemberIdentity(G, userIdFor('dan'));
+    const r = await dan2.sync(G);
+    expect(r.texts).toEqual(['hello', 'early-1', 'early-2']); // bob's own + alice's, forwarded by bob
+    expect(dan2.groups.isWaiting(G)).toBe(false);
+  });
+
+  it('a held inbound session is not forwarded to a member added later', async () => {
+    const { s, m } = await world(['alice', 'bob', 'carol', 'dave']);
+    s.create(G, 'alice', ['bob', 'carol']);
+    await m.alice!.send(G, 'secret');
+    expect((await m.bob!.sync(G)).texts).toEqual(['secret']);
+    s.add(G, 'bob', 'dave');
+    await m.bob!.sync(G);
+    await m.bob!.groups.reshare(G, [userIdFor('dave')]);
+    const res = await m.dave!.groups.receive(G, s.groups.get(G)!.msgs.filter((x) => x.kind === 'message'));
+    await m.dave!.groups.receiveToDevice(s.drainToDevice('dave'));
+    const again = await m.dave!.groups.receive(G, s.groups.get(G)!.msgs.filter((x) => x.kind === 'message'));
+    expect(res.map((x: any) => x.ok)).toEqual([false]);
+    expect(again.map((x: any) => (x.ok ? x.plaintext : x.code))).toEqual(['MISSING_ROOM_KEY']);
+  });
 });

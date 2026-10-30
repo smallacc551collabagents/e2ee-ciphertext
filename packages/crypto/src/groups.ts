@@ -279,6 +279,8 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     const out: GroupReceiveResult[] = [];
     const sorted = [...dtos].sort((x, y) => (BigInt(x.seq) < BigInt(y.seq) ? -1 : BigInt(x.seq) > BigInt(y.seq) ? 1 : 0));
     let missing = false;
+    let cur: GroupInfo | null | undefined; // fetched lazily, once per receive()
+    const entitled: Record<string, string[]> = {};
     for (const dto of sorted) {
       if (dto.kind === 'member_event' || dto.kind === 'system') {
         await onMembershipChanged(groupId);
@@ -301,6 +303,13 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
           sentAt: dto.createdAt ?? new Date(ts).toISOString(), ...(dto.clientMsgId ? { clientMsgId: dto.clientMsgId } : {}),
         });
         out.push({ kind: 'message', ok: true, dto, sender: env.sender, plaintext: r.plaintext });
+        // Remember who was entitled to an inbound session we hold, so we can forward it to a member's accepted
+        // new device (reshare / key requests) even when the original sender is offline or lost its device.
+        // Only recorded when the message was sent for the current membership version (members = current list).
+        if (r.sessionId && env.sender.userId !== self.userId && !entitled[r.sessionId]) {
+          if (cur === undefined) { try { cur = await o.backend.getGroup(groupId); } catch { cur = null; } }
+          if (cur && cur.membershipVersion === env.membershipVersion && cur.members.includes(env.sender.userId)) entitled[r.sessionId] = [...cur.members];
+        }
       } else {
         if (r.code === 'MISSING_ROOM_KEY') {
           missing = true;
@@ -308,6 +317,12 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
         }
         out.push({ kind: 'message', ok: false, dto, code: r.code });
       }
+    }
+    if (Object.keys(entitled).length) {
+      const st = await load(groupId);
+      let dirty = false;
+      for (const [sid, mem] of Object.entries(entitled)) if (!st.sessionMembers[sid]) { st.sessionMembers[sid] = mem; dirty = true; }
+      if (dirty) await store.set(groupId, st);
     }
     if (missing) waiting.add(groupId);
     else waiting.delete(groupId);

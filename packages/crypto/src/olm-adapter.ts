@@ -239,7 +239,7 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<OlmAdap
       withLock(lockName, async () => {
         guard();
         const json = await machine.exportRoomKeys(
-          (s) => s.roomId.toString() === roomOf(groupId) && s.sessionId === sessionId && s.senderKey.toBase64() === ident.curve25519,
+          (s) => s.roomId.toString() === roomOf(groupId) && s.sessionId === sessionId, // own outbound or a held inbound session (forwarding)
         );
         const arr = JSON.parse(json) as unknown[];
         return arr.length ? json : null;
@@ -250,10 +250,11 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<OlmAdap
         guard();
         let arr: { room_id?: string; session_id?: string; sender_key?: string }[];
         try { arr = JSON.parse(json); } catch { return false; }
-        // Only accept exactly the requested session, created by the device that answered.
+        // Only accept exactly the requested session. It may be forwarded by another member (sender_key !== answerer);
+        // decryptGroup() still binds every message to the claimed sender device's curve25519 key.
         if (!Array.isArray(arr) || arr.length !== 1) return false;
         const k = arr[0]!;
-        if (k.room_id !== roomOf(groupId) || k.session_id !== sessionId || k.sender_key !== senderCurve25519) return false;
+        if (k.room_id !== roomOf(groupId) || k.session_id !== sessionId || typeof k.sender_key !== 'string' || !senderCurve25519) return false;
         const r = await machine.importExportedRoomKeys(json, () => {});
         return r.importedCount > 0 || r.totalCount > 0;
       }),
