@@ -73,6 +73,14 @@ export class FakeGroupServer {
   }
   backend(user: string): GroupBackend {
     return {
+      getMembers: async (id) => {
+        if (id.startsWith('dm:')) {
+          const [x, y] = id.slice(3).split('|') as [string, string];
+          if (!this.hasDm(x, y) || (user !== x && user !== y)) throw err(404, 'not_found');
+          return [userIdFor(x), userIdFor(y)];
+        }
+        return this.g(id, user).members.map((m) => userIdFor(m.u));
+      },
       getGroup: async (id) => {
         const g = this.g(id, user);
         return { id, adminUserId: userIdFor(g.admin), membershipVersion: g.version, members: g.members.map((m) => userIdFor(m.u)) };
