@@ -59,3 +59,20 @@ describe("readTracker", () => {
     vi.useRealTimers();
   });
 });
+
+import { foldReadReceipts, mergeReads } from "./model";
+describe("read receipts (E2EE, monotonic)", () => {
+  it("ignores older/equal upToSeq per fromUserId", () => {
+    let m = foldReadReceipts({}, [{ conversationId: "c", fromUserId: "b", upToSeq: 5, ts: 1 }]);
+    const same = foldReadReceipts(m, [{ conversationId: "c", fromUserId: "b", upToSeq: 3, ts: 2 }, { conversationId: "c", fromUserId: "b", upToSeq: 5, ts: 2 }]);
+    expect(same).toBe(m);
+    m = foldReadReceipts(m, [{ conversationId: "c", fromUserId: "b", upToSeq: 7, ts: 3 }]);
+    expect(m.c!.b!.upToSeq).toBe(7);
+  });
+  it("group goes blue only when every member's upToSeq covers the message", () => {
+    const marks = foldReadReceipts({}, [{ conversationId: "g", fromUserId: "b", upToSeq: 10, ts: 1 }, { conversationId: "g", fromUserId: "c", upToSeq: 4, ts: 1 }]).g;
+    const base = [{ userId: "b", deliveredAt: "x" }, { userId: "c", deliveredAt: "x" }];
+    expect(tickState("sent", ["b", "c"], mergeReads(base, ["b", "c"], marks, 5))).toBe("delivered");
+    expect(tickState("sent", ["b", "c"], mergeReads(base, ["b", "c"], marks, 4))).toBe("read");
+  });
+});

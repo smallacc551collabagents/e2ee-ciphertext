@@ -10,7 +10,7 @@ import { changeKindLabel, identityWarning, NEW_DEVICE_COPY } from "./identityCop
 import { newChatErrorMessage, validatePeerUsername } from "./newChat";
 import { CreateGroupDialog, MembersPanel } from "./GroupPanels";
 import { receiptsAdapter, type ConversationReceipts } from "./receipts/adapter";
-import { formatLastSeen, readTracker, tickState, type Presence } from "./receipts/model";
+import { foldReadReceipts, formatLastSeen, mergeReads, readTracker, tickState, type Presence, type ReadMarks } from "./receipts/model";
 import { Ticks } from "./receipts/ui";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
 
@@ -53,6 +53,8 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   const [msgs, setMsgs] = useState<Load<MessageView[]>>({ state: "loading" });
   const receipts = receiptsAdapter();
   const [rcpt, setRcpt] = useState<ConversationReceipts>({ recipients: [], byMessage: {} });
+  const [marks, setMarks] = useState<ReadMarks>({});
+  useEffect(() => receipts.onReceipts((r) => setMarks((m) => foldReadReceipts(m, r))), [receipts]);
   const [presence, setPresence] = useState<Record<string, Presence>>({});
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
@@ -66,24 +68,19 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
       receipts.presence(activeId).then((p) => { if (live) setPresence(p); }, () => undefined);
     };
     load();
-    const off = receipts.onReceipt((cid) => { if (cid === activeId) load(); });
+    const off = receipts.onReceipts((r) => { if (r.some((x) => x.conversationId === activeId)) load(); });
     return () => { live = false; off(); };
   }, [activeId, receipts]);
   // Read trigger: chat open AND tab visible -> one E2EE receipt for the highest message seen (debounced).
-  const msgsRef = useRef(msgs); msgsRef.current = msgs;
-  const tracker = useMemo(() => (activeId ? readTracker((seq) => {
-    const cur = msgsRef.current; const list = cur.state === "ready" ? cur.data : [];
-    const m = [...list].reverse().find((x) => !x.fromMe && !x.system);
-    if (m) void receipts.sendRead(activeId, m.id, seq).catch(() => undefined);
-  }) : null), [activeId, receipts]);
+  const tracker = useMemo(() => (activeId ? readTracker((seq) => { void receipts.sendRead(activeId, seq).catch(() => undefined); }) : null), [activeId, receipts]);
   useEffect(() => () => tracker?.cancel(), [tracker]);
   useEffect(() => {
     if (!tracker || !receipts.available || msgs.state !== "ready") return;
     const check = () => {
       if (document.visibilityState !== "visible") return;
       const list = msgs.data; let idx = -1;
-      for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.fromMe && !list[i]!.system) { idx = i; break; }
-      if (idx >= 0) tracker.seen(list[idx]!.seq ?? idx);
+      for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.fromMe && !list[i]!.system && list[i]!.seq !== undefined) { idx = i; break; }
+      if (idx >= 0) tracker.seen(list[idx]!.seq!);
     };
     check();
     document.addEventListener("visibilitychange", check);
@@ -409,7 +406,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                               : <p className="whitespace-pre-wrap break-words text-sm">{m.text}</p>}
                             <p className={`mt-1 text-right text-[11px] ${m.fromMe ? "text-blue-100" : "text-slate-400"}`}>
                               {clockTime(m.sentAt)}
-                              {m.fromMe && <> <Ticks tick={tickState(m.status, rcpt.recipients, rcpt.byMessage[m.id])} /></>}
+                              {m.fromMe && <> <Ticks tick={tickState(m.status, rcpt.recipients, mergeReads(rcpt.byMessage[m.id], rcpt.recipients, activeId ? marks[activeId] : undefined, m.seq))} /></>}
                               {m.fromMe && m.status === "failed" && m.clientId && (
                                 <button type="button" onClick={() => void send(m.text, m.clientId!)} className="ml-2 underline">Retry</button>
                               )}

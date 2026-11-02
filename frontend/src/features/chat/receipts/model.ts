@@ -56,3 +56,32 @@ export function readTracker(send: (seq: number) => void, wait = 500) {
     cancel() { if (timer) clearTimeout(timer); timer = null; },
   };
 }
+
+/** Decrypted read receipt from crypto receiveToDevice() (/sync/wait only wakes the client). */
+export interface ReadReceipt { conversationId: string; fromUserId: string; upToSeq: number; ts: string | number }
+/** conversationId -> fromUserId -> highest read {seq, ts}. */
+export type ReadMarks = Record<string, Record<string, { upToSeq: number; ts: string }>>;
+
+/** upToSeq is monotonic per sender: older/equal values are ignored. Returns the same object if nothing changed. */
+export function foldReadReceipts(marks: ReadMarks, incoming: readonly ReadReceipt[]): ReadMarks {
+  let out = marks;
+  for (const r of incoming) {
+    if (!Number.isFinite(r.upToSeq)) continue;
+    const prev = out[r.conversationId]?.[r.fromUserId];
+    if (prev && prev.upToSeq >= r.upToSeq) continue;
+    const ts = typeof r.ts === "number" ? new Date(r.ts).toISOString() : r.ts;
+    if (out === marks) out = { ...marks };
+    out[r.conversationId] = { ...out[r.conversationId], [r.fromUserId]: { upToSeq: r.upToSeq, ts } };
+  }
+  return out;
+}
+
+/** Merge server delivered state with E2EE read marks for one own message (by seq). */
+export function mergeReads(base: readonly RecipientReceipt[] | undefined, recipients: readonly string[], marks: ReadMarks[string] | undefined, seq: number | undefined): RecipientReceipt[] {
+  const by = new Map((base ?? []).map((r) => [r.userId, { ...r }]));
+  if (marks && seq !== undefined) for (const u of recipients) {
+    const m = marks[u];
+    if (m && m.upToSeq >= seq) by.set(u, { ...by.get(u), userId: u, readAt: by.get(u)?.readAt ?? m.ts });
+  }
+  return [...by.values()];
+}
