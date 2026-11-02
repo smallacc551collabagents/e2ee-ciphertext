@@ -91,6 +91,8 @@ export interface ToDeviceDto { id: string; seq: string; sender: string; cipherte
 /** What createGroupCrypto needs from the server. createHttpGroupBackend implements it over docs/group-api-proposal.md. */
 export interface GroupBackend {
   getGroup(groupId: string): Promise<GroupInfo>;
+  /** Current members (library user ids) of any conversation, 1:1 or group. Used to accept read receipts. Defaults to getGroup().members. */
+  getMembers?(conversationId: string): Promise<readonly string[]>;
   /** Rejects with {status: 409, body: {error: 'membership_changed'}} when membershipVersion is stale. */
   postMessage(groupId: string, body: { clientMsgId: string; ciphertext: string; version: 1; membershipVersion: number }): Promise<unknown>;
   sendToDevice(envelopes: readonly CiphertextEnvelope[]): Promise<void>;
@@ -104,6 +106,12 @@ export const STALE_MEMBERSHIP_ERRORS: readonly string[] = ['membership_changed',
 /** Matches the merged backend (PR #56): GET /conversations (kind "group"), POST /to-device {recipient,ciphertext,type,version}. */
 export function createHttpGroupBackend(http: BackendHttp): GroupBackend {
   return {
+    async getMembers(id) {
+      const r = (await http.request('GET', '/conversations')) as { conversations: { id: string; members: { username: string }[] }[] };
+      const c = r.conversations.find((x) => x.id === id);
+      if (!c) throw new CryptoError('INVALID_OPTIONS', 'Conversation not found');
+      return c.members.map((m) => userIdFor(m.username));
+    },
     async getGroup(id) {
       const r = (await http.request('GET', '/conversations')) as {
         conversations: { id: string; kind: string; adminId?: string | null; membershipVersion?: number; members: { id: string; username: string }[] }[];
@@ -199,6 +207,11 @@ export type GroupReceiveResult =
   | { kind: 'member_event'; dto: GroupMessageDto };
 
 interface KeyRequest { t: 'org.e2ee.group.key_request'; groupId: string; sessionId: string }
+/** Olm to-device read receipt (never carries or triggers key material). */
+export interface ReadReceiptEvent { type: 'receipt'; conversationId: string; upToSeq: string; ts: number }
+/** A verified, monotonic receipt returned by receiveToDevice(). */
+export interface ReadReceipt { conversationId: string; fromUserId: string; upToSeq: string; ts: number }
+export interface SendReadReceiptResult { sent: DeviceAddress[]; skipped: { userId: string; reason: 'self' | 'not_member' | 'no_verified_device' | 'identity_pending' | 'encrypt_failed' }[] }
 interface KeyResponse { t: 'org.e2ee.group.key_response'; groupId: string; sessionId: string; keys: string }
 
 export interface GroupCryptoOptions {
@@ -399,6 +412,51 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     }
   }
 
+  const receiptSeen = new Map<string, bigint>(); // `${conversationId}|${fromUserId}` -> highest upToSeq accepted
+  const SEQ = /^\d{1,30}$/;
+  async function membersOf(conversationId: string): Promise<readonly string[] | null> {
+    try { return o.backend.getMembers ? await o.backend.getMembers(conversationId) : (await o.backend.getGroup(conversationId)).members; } catch { return null; }
+  }
+
+  /** Olm-encrypt {type:'receipt', conversationId, upToSeq, ts} to each author's verified device (1:1 or group). Never shares keys. */
+  async function sendReadReceipt(conversationId: string, upToSeq: string | number | bigint, authorUserIds: readonly string[]): Promise<SendReadReceiptResult> {
+    const peers = needPeers();
+    const seq = String(upToSeq);
+    if (!conversationId || !SEQ.test(seq)) throw new CryptoError('INVALID_OPTIONS', 'Invalid receipt');
+    const ev: ReadReceiptEvent = { type: 'receipt', conversationId, upToSeq: seq, ts: Date.now() };
+    const members = await membersOf(conversationId);
+    const out: SendReadReceiptResult = { sent: [], skipped: [] };
+    const envs: CiphertextEnvelope[] = [];
+    for (const u of [...new Set(authorUserIds)]) {
+      if (u === self.userId) { out.skipped.push({ userId: u, reason: 'self' }); continue; }
+      if (!members?.includes(u) || !members.includes(self.userId)) { out.skipped.push({ userId: u, reason: 'not_member' }); continue; }
+      const p = await peers.get(u);
+      if (!p) { out.skipped.push({ userId: u, reason: 'no_verified_device' }); continue; }
+      if (p.pendingChange) { out.skipped.push({ userId: u, reason: 'identity_pending' }); continue; }
+      const to = { userId: u, deviceId: p.identity.deviceId };
+      try { envs.push(await a.encrypt(to, JSON.stringify(ev))); out.sent.push(to); }
+      catch { out.skipped.push({ userId: u, reason: 'encrypt_failed' }); }
+    }
+    if (envs.length) await o.backend.sendToDevice(envs);
+    return out;
+  }
+
+  async function acceptReceipt(from: DeviceAddress, m: Partial<ReadReceiptEvent>): Promise<ReadReceipt | null> {
+    if (from.userId === self.userId || typeof m.conversationId !== 'string' || !m.conversationId) return null;
+    const seq = typeof m.upToSeq === 'number' && Number.isSafeInteger(m.upToSeq) ? String(m.upToSeq) : m.upToSeq;
+    if (typeof seq !== 'string' || !SEQ.test(seq) || typeof m.ts !== 'number' || !Number.isFinite(m.ts)) return null;
+    const known = o.peers ? await o.peers.get(from.userId) : undefined;
+    if (o.peers && (!known || known.pendingChange || known.identity.deviceId !== from.deviceId)) return null; // only the verified device
+    const members = await membersOf(m.conversationId);
+    if (!members?.includes(from.userId) || !members.includes(self.userId)) return null;
+    const k = `${m.conversationId}|${from.userId}`;
+    const n = BigInt(seq);
+    const prev = receiptSeen.get(k);
+    if (prev !== undefined && n <= prev) return null; // monotonic
+    receiptSeen.set(k, n);
+    return { conversationId: m.conversationId, fromUserId: from.userId, upToSeq: seq, ts: m.ts };
+  }
+
   async function isMember(groupId: string, userId: string) {
     try { return ((g) => g.members.includes(userId) && g.members.includes(self.userId))(await o.backend.getGroup(groupId)); } catch { return false; }
   }
@@ -418,11 +476,19 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     const answered: { to: DeviceAddress; groupId: string; status: 'sent' | 'refused' | 'deferred' }[] = [];
     const imported = new Set<string>();
     const upgraded = new Set<string>();
+    const receipts: ReadReceipt[] = [];
     for (const r of res) {
       if (r.kind === 'room_key') { roomKeys++; continue; }
       if (r.kind !== 'message') continue;
-      let m: KeyRequest | KeyResponse;
-      try { m = JSON.parse(r.plaintext) as KeyRequest | KeyResponse; } catch { continue; }
+      let raw: unknown;
+      try { raw = JSON.parse(r.plaintext); } catch { continue; }
+      if (!raw || typeof raw !== 'object') continue;
+      if ((raw as { type?: unknown }).type === 'receipt' && !('t' in raw)) {
+        const rc = await acceptReceipt(r.envelope.sender, raw as Partial<ReadReceiptEvent>);
+        if (rc) receipts.push(rc);
+        continue; // receipts never reach key request/response handling
+      }
+      const m = raw as KeyRequest | KeyResponse;
       if (m.t === 'org.e2ee.group.key_request' && typeof m.groupId === 'string' && typeof m.sessionId === 'string') {
         answered.push({ to: r.envelope.sender, groupId: m.groupId, status: await answer(r.envelope.sender, m) });
       } else if (m.t === 'org.e2ee.group.key_response' && typeof m.keys === 'string' && typeof m.groupId === 'string' && typeof m.sessionId === 'string'
@@ -449,7 +515,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
       await setForwarded(r.groupId, r.sessionId, false);
     }
     const retry = roomKeys ? [...new Set([...waiting, ...imported, ...upgraded])] : [...new Set([...imported, ...upgraded])];
-    return { roomKeys, answered, retry, upgraded: [...upgraded] };
+    return { roomKeys, answered, retry, upgraded: [...upgraded], receipts };
   }
 
   /** Unsolicited response worth taking: the session creator's own device sends a session we only hold as forwarded. */
@@ -527,7 +593,8 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   /** Members of the group whose known identity changed and is not accepted yet (keys are withheld from them). */
   async function getPendingIdentities(groupId: string): Promise<{ userId: string; previous: DeviceIdentity; current: DeviceIdentity }[]> {
     const peers = needPeers();
-    const g = await o.backend.getGroup(groupId);
+    // Reuse the membership fetched by send()/refreshMembers(); it is dropped (and refetched) on membership change.
+    const g = groupCache.get(groupId) ?? await fetchGroup(groupId);
     const out = [];
     for (const u of g.members) {
       if (u === self.userId) continue;
@@ -557,7 +624,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   // Logout: closeCryptoSession() drops in-memory key-request state and makes this instance unusable,
   // so a later login can never send or answer with the previous user's group state.
   const untrack = trackOpen(o.storeName ?? `groups:${self.userId}`, () => {
-    closed = true; requested.clear(); waiting.clear(); deferred.clear(); forgetCaches();
+    closed = true; requested.clear(); waiting.clear(); deferred.clear(); receiptSeen.clear(); forgetCaches();
   });
   const guard = () => {
     if (closed) throw new CryptoError('NOT_INITIALIZED', 'Group crypto is closed (logged out)');
@@ -569,6 +636,7 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
     send: g(send),
     receive: g(receive),
     receiveToDevice: g(receiveToDevice),
+    sendReadReceipt: g(sendReadReceipt),
     onMembershipChanged: g(onMembershipChanged),
     reshare: g(reshare),
     forget: g(forget),

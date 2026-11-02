@@ -18,6 +18,7 @@ export class FakeGroupServer {
   private clock = 0;
   private n = 0;
 
+  getGroupCalls = 0;
   dm(a: string, b: string) { this.direct.add([a, b].sort().join('|')); }
   private hasDm(a: string, b: string) { return this.direct.has([a, b].sort().join('|')); }
   private g(id: string, caller: string) {
@@ -73,7 +74,16 @@ export class FakeGroupServer {
   }
   backend(user: string): GroupBackend {
     return {
+      getMembers: async (id) => {
+        if (id.startsWith('dm:')) {
+          const [x, y] = id.slice(3).split('|') as [string, string];
+          if (!this.hasDm(x, y) || (user !== x && user !== y)) throw err(404, 'not_found');
+          return [userIdFor(x), userIdFor(y)];
+        }
+        return this.g(id, user).members.map((m) => userIdFor(m.u));
+      },
       getGroup: async (id) => {
+        this.getGroupCalls++;
         const g = this.g(id, user);
         return { id, adminUserId: userIdFor(g.admin), membershipVersion: g.version, members: g.members.map((m) => userIdFor(m.u)) };
       },
