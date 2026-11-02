@@ -22,7 +22,20 @@ export const CIPHERTEXT_MAX_BYTES = 32 * 1024;
 export const b64Bytes = (s: string) => Math.floor((s.length * 3) / 4) - (s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0);
 const capped = (max: number) => b64.min(4).max(Math.ceil(max / 3) * 4).refine((s) => b64Bytes(s) <= max, `≤ ${max} bytes`);
 
-export const memberSchema = z.object({ id: z.string(), username: z.string(), joinedAt: z.string().optional() });
+// presence: null when hidden (target hides, or viewer hides theirs — reciprocal). online = seen within 60s.
+export const PRESENCE_ONLINE_SECONDS = 60;
+export const presenceSchema = z.object({ online: z.boolean(), lastSeenAt: z.string().nullable() });
+// deliveredSeq: every message in this conversation with seq <= deliveredSeq addressed to this member has been
+// acked by them (grey double tick). Persisted watermark; survives server-side message deletion.
+export const memberSchema = z.object({
+  id: z.string(), username: z.string(), joinedAt: z.string().optional(),
+  deliveredSeq: z.string().optional(), deliveredAt: z.string().nullable().optional(),
+  presence: presenceSchema.nullable().optional(),
+});
+export type PresenceWire = z.infer<typeof presenceSchema>;
+// PUT /me/privacy -> 200 { hideLastSeen }; GET /auth/me returns user.hideLastSeen. POST /presence/heartbeat -> 204.
+export const privacyRequestSchema = z.object({ hideLastSeen: z.boolean() }).strict();
+export const privacyResponseSchema = z.object({ hideLastSeen: z.boolean() });
 // Groups (Phase 6, Megolm): kind "group" adds adminId (creator; never removable), membershipVersion (bumped
 // on every add/remove/leave/admin change) and optional opaque encryptedMeta (e.g. encrypted group name).
 export const GROUP_MAX_MEMBERS = 50;
@@ -161,8 +174,10 @@ export type PublishKeysRequest = z.infer<typeof publishKeysRequestSchema>;
 // A v1 cursor is accepted and treated like no `since`.
 export const SYNC_WAIT_MAX_SECONDS = 25;
 const n15 = "[0-9]{1,15}";
-export const syncCursorSchema = z.string().regex(new RegExp(`^v2(\\.${n15}){7}$`));
-export const syncSinceSchema = z.union([syncCursorSchema, z.string().regex(new RegExp(`^v1(\\.${n15}){3}$`))]);
+// v3 = v2 + high-water mark (ms) of members' delivered_at across my conversations (wakes on delivery receipts).
+// v1/v2 cursors are accepted and treated like no `since` (immediate return with a fresh v3 cursor).
+export const syncCursorSchema = z.string().regex(new RegExp(`^v3(\\.${n15}){8}$`));
+export const syncSinceSchema = z.union([syncCursorSchema, z.string().regex(new RegExp(`^v2(\\.${n15}){7}$`)), z.string().regex(new RegExp(`^v1(\\.${n15}){3}$`))]);
 export const syncWaitQuerySchema = z.object({
   since: syncSinceSchema.optional(),
   timeout: z.string().regex(/^[0-9]{1,2}$/).optional(),
@@ -172,6 +187,8 @@ export const syncWaitResponseSchema = z.object({
   cursor: syncCursorSchema,
   conversations: z.array(z.string()),
   toDevice: z.boolean(),
+  /** Conversations where some member's deliveredSeq advanced (refresh GET /conversations for ticks). */
+  delivered: z.array(z.string()).optional(),
 });
 export type SyncWaitResponse = z.infer<typeof syncWaitResponseSchema>;
 

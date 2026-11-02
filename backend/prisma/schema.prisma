@@ -21,6 +21,10 @@ model User {
   passwordHash     String               @map("password_hash")
   createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  /// Presence: last authenticated activity (throttled to ~30s writes). Server-side metadata.
+  lastSeenAt       DateTime?            @map("last_seen_at") @db.Timestamptz(3)
+  /// Privacy: hide my last seen; reciprocal (I then see nobody's).
+  hideLastSeen     Boolean              @default(false) @map("hide_last_seen")
   sessions         Session[]
   resetTokens      PasswordResetToken[]
   identityKey      IdentityKey?
@@ -122,6 +126,9 @@ model ConversationMember {
   joinedAt       DateTime     @default(now()) @map("joined_at") @db.Timestamptz(3)
   /// Seq at join; member sees only messages with seq > joinedSeq.
   joinedSeq      BigInt       @default(0) @map("joined_seq")
+  /// Delivery watermark: every message with seq <= deliveredSeq addressed to this member was acked.
+  deliveredSeq   BigInt       @default(0) @map("delivered_seq")
+  deliveredAt    DateTime?    @map("delivered_at") @db.Timestamptz(3)
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 

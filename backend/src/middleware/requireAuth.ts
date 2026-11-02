@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { userForSession, type PublicUser } from "../services/auth.js";
+import { touchLastSeen } from "../services/presence.js";
 
 export const SESSION_COOKIE = "e2ee_session";
 
@@ -16,6 +17,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Pro
     return;
   }
   req.user = user;
+  await touchLastSeen(user.id); // last seen: any authenticated call (incl. /sync/wait); throttled to ~30s
 }
 
 /** Authenticated user; only call in routes guarded by requireAuth. */
