@@ -108,10 +108,7 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
         await c.query(
           `INSERT INTO identity_keys (user_id, identity_key, identity_key_version, signed_prekey_id, signed_prekey, signed_prekey_signature, signed_prekey_version)
            VALUES ($1,$2,$3,$4,$5,$6,$7)
-           ON CONFLICT (user_id) DO UPDATE SET identity_key = EXCLUDED.identity_key, -- Server-owned version: same key bytes never change it; new bytes always bump (client can't roll back).
-             identity_key_version = CASE WHEN identity_keys.identity_key IS DISTINCT FROM EXCLUDED.identity_key
-               THEN GREATEST(identity_keys.identity_key_version + 1, EXCLUDED.identity_key_version)
-               ELSE identity_keys.identity_key_version END,
+           ON CONFLICT (user_id) DO UPDATE SET identity_key = EXCLUDED.identity_key, identity_key_version = EXCLUDED.identity_key_version,
              signed_prekey_id = EXCLUDED.signed_prekey_id, signed_prekey = EXCLUDED.signed_prekey,
              signed_prekey_signature = EXCLUDED.signed_prekey_signature, signed_prekey_version = EXCLUDED.signed_prekey_version, updated_at = now()`,
           [uid, ik, identityKey.version, signedPrekey.keyId, spk, sig, signedPrekey.version]);
