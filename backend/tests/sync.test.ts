@@ -93,7 +93,7 @@ test("new 1:1 conversation wakes the peer mid-wait", async () => {
   assert.equal(r.changed, true);
   assert.deepEqual(r.conversations, [conv]);
   assert.notEqual(r.cursor, cursorB);
-  assert.match(r.cursor, /^v2\./);
+  assert.match(r.cursor, /^v3\./);
   cursorB = r.cursor;
 });
 

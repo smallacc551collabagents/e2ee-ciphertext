@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import * as auth from "../services/auth.js";
 import { clientIp } from "../utils/clientIp.js";
-import { tx } from "../database/db.js";
+import { q, tx } from "../database/db.js";
+import { touchLastSeen } from "../services/presence.js";
 import { objectStore } from "../services/objectStore.js";
 import { shared } from "../utils/sharedSchema.js";
 import { deleteAccountRequestSchema } from "@e2ee/shared";
@@ -143,6 +144,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const t = tokenFrom(req);
     const user = t ? await auth.userForSession(t) : null;
     if (!user) return reply.code(401).send({ error: "unauthenticated", message: "Not signed in." });
-    return reply.send({ user });
+    const p = await q().query<{ hide_last_seen: boolean }>(`SELECT hide_last_seen FROM users WHERE id = $1`, [user.id]);
+    await touchLastSeen(user.id);
+    return reply.send({ user: { ...user, hideLastSeen: !!p.rows[0]?.hide_last_seen } });
   });
 }
