@@ -80,4 +80,20 @@ describe('encrypted read receipts', () => {
     expect(ids(r)).toEqual([]);
     expect(s.toDevice.length).toBe(0);
   });
+
+  it('getPendingIdentities reuses cached membership: one GET per refreshMembers, refetched after a membership change', async () => {
+    const { s, alice } = await setup();
+    await alice.groups.refreshMembers(G, { force: false });
+    let n = s.getGroupCalls;
+    await alice.groups.refreshMembers(G, { force: false });
+    expect(s.getGroupCalls - n).toBe(1); // was 2 (refreshMembers + getPendingIdentities)
+    n = s.getGroupCalls;
+    await alice.groups.getPendingIdentities(G);
+    expect(s.getGroupCalls - n).toBe(0);
+    s.remove(G, 'alice', 'carol');
+    await alice.groups.onMembershipChanged(G);
+    n = s.getGroupCalls;
+    await alice.groups.getPendingIdentities(G);
+    expect(s.getGroupCalls - n).toBe(1);
+  });
 });

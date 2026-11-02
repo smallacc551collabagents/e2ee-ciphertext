@@ -593,7 +593,8 @@ export function createGroupCrypto(o: GroupCryptoOptions) {
   /** Members of the group whose known identity changed and is not accepted yet (keys are withheld from them). */
   async function getPendingIdentities(groupId: string): Promise<{ userId: string; previous: DeviceIdentity; current: DeviceIdentity }[]> {
     const peers = needPeers();
-    const g = await o.backend.getGroup(groupId);
+    // Reuse the membership fetched by send()/refreshMembers(); it is dropped (and refetched) on membership change.
+    const g = groupCache.get(groupId) ?? await fetchGroup(groupId);
     const out = [];
     for (const u of g.members) {
       if (u === self.userId) continue;

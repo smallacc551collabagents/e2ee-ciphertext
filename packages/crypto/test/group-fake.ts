@@ -18,6 +18,7 @@ export class FakeGroupServer {
   private clock = 0;
   private n = 0;
 
+  getGroupCalls = 0;
   dm(a: string, b: string) { this.direct.add([a, b].sort().join('|')); }
   private hasDm(a: string, b: string) { return this.direct.has([a, b].sort().join('|')); }
   private g(id: string, caller: string) {
@@ -82,6 +83,7 @@ export class FakeGroupServer {
         return this.g(id, user).members.map((m) => userIdFor(m.u));
       },
       getGroup: async (id) => {
+        this.getGroupCalls++;
         const g = this.g(id, user);
         return { id, adminUserId: userIdFor(g.admin), membershipVersion: g.version, members: g.members.map((m) => userIdFor(m.u)) };
       },
