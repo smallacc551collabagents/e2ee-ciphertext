@@ -1,4 +1,5 @@
 "use client";
+import { formatLastSeen, type Presence } from "./receipts/model";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ChatAdapter, ConversationView, GroupInfo } from "./data";
 import { addCandidates, GROUP_MAX_MEMBERS, groupErrorMessage } from "./groupCopy";
@@ -74,7 +75,7 @@ export function CreateGroupDialog({ adapter, onClose, onCreated }: { adapter: Ch
   );
 }
 
-export function MembersPanel({ adapter, conversationId, meId, onLeft, onChanged }: { adapter: ChatAdapter; conversationId: string; meId: string; onLeft: () => void; onChanged: () => void }) {
+export function MembersPanel({ adapter, conversationId, meId, onLeft, onChanged, presence = {}, now = Date.now() }: { presence?: Record<string, Presence>; now?: number; adapter: ChatAdapter; conversationId: string; meId: string; onLeft: () => void; onChanged: () => void }) {
   const [info, setInfo] = useState<GroupInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState<null | { query: string; picked: Set<string>; contacts: string[] | null }>(null);
@@ -103,7 +104,8 @@ export function MembersPanel({ adapter, conversationId, meId, onLeft, onChanged 
             return (
               <li key={m.id} data-testid="member" data-username={m.username} className="flex items-center justify-between gap-2 rounded-lg px-2 py-1">
                 <span>@{m.username}{isMe && <span className="text-slate-500"> (you)</span>}
-                  {isAdmin && <span data-testid="admin-badge" className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">Admin</span>}</span>
+                  {isAdmin && <span data-testid="admin-badge" className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-800">Admin</span>}
+                  {!isMe && (() => { const l = formatLastSeen(presence[m.username], new Date(now)); return l ? <span data-testid="member-last-seen" className="block text-xs text-slate-500">{l}</span> : null; })()}</span>
                 {!isAdmin && !isMe && (confirmRemove === m.username ? (
                   <span className="flex gap-2">
                     <button type="button" disabled={busy} onClick={() => void run(() => adapter.removeGroupMember!(conversationId, m.username), () => setConfirmRemove(null))} className="text-red-600 underline">Confirm remove</button>

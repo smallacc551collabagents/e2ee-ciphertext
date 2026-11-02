@@ -3,17 +3,16 @@ import { onSessionEnd, bindTab, assertSameAccount } from "@/lib/session-guard";
 import { mergeThread } from "./mergeThread";
 import { coalesce, createRealtime, createSyncWaitStream } from "@/lib/realtime";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
+import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
 import { AttachmentError, type Phase } from "./attachments/flow";
 import { changeKindLabel, identityWarning, NEW_DEVICE_COPY } from "./identityCopy";
 import { newChatErrorMessage, validatePeerUsername } from "./newChat";
 import { CreateGroupDialog, MembersPanel } from "./GroupPanels";
+import { receiptsAdapter, type ConversationReceipts } from "./receipts/adapter";
+import { formatLastSeen, readTracker, tickState, type Presence } from "./receipts/model";
+import { Ticks } from "./receipts/ui";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
-
-const STATUS_LABEL: Record<MessageStatus, string> = {
-  sending: "Sending…", sent: "✓ Sent", delivered: "✓✓ Delivered", read: "✓✓ Read", failed: "Failed",
-};
 
 type Load<T> = { state: "loading" } | { state: "ready"; data: T } | { state: "error" } | { state: "unavailable" };
 const toLoad = <T,>(e: unknown): Load<T> => (e instanceof FeatureUnavailableError ? { state: "unavailable" } : { state: "error" });
@@ -52,6 +51,44 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   const [convos, setConvos] = useState<Load<ConversationView[]>>({ state: "loading" });
   const [activeId, setActiveId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Load<MessageView[]>>({ state: "loading" });
+  const receipts = receiptsAdapter();
+  const [rcpt, setRcpt] = useState<ConversationReceipts>({ recipients: [], byMessage: {} });
+  const [presence, setPresence] = useState<Record<string, Presence>>({});
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
+  // Receipts + last seen (empty until backend/crypto land: single tick, no last seen).
+  useEffect(() => {
+    setRcpt({ recipients: [], byMessage: {} }); setPresence({});
+    if (!activeId || !receipts.available) return;
+    let live = true;
+    const load = () => {
+      receipts.receipts(activeId).then((r) => { if (live) setRcpt(r); }, () => undefined);
+      receipts.presence(activeId).then((p) => { if (live) setPresence(p); }, () => undefined);
+    };
+    load();
+    const off = receipts.onReceipt((cid) => { if (cid === activeId) load(); });
+    return () => { live = false; off(); };
+  }, [activeId, receipts]);
+  // Read trigger: chat open AND tab visible -> one E2EE receipt for the highest message seen (debounced).
+  const msgsRef = useRef(msgs); msgsRef.current = msgs;
+  const tracker = useMemo(() => (activeId ? readTracker((seq) => {
+    const cur = msgsRef.current; const list = cur.state === "ready" ? cur.data : [];
+    const m = [...list].reverse().find((x) => !x.fromMe && !x.system);
+    if (m) void receipts.sendRead(activeId, m.id, seq).catch(() => undefined);
+  }) : null), [activeId, receipts]);
+  useEffect(() => () => tracker?.cancel(), [tracker]);
+  useEffect(() => {
+    if (!tracker || !receipts.available || msgs.state !== "ready") return;
+    const check = () => {
+      if (document.visibilityState !== "visible") return;
+      const list = msgs.data; let idx = -1;
+      for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.fromMe && !list[i]!.system) { idx = i; break; }
+      if (idx >= 0) tracker.seen(list[idx]!.seq ?? idx);
+    };
+    check();
+    document.addEventListener("visibilitychange", check);
+    return () => document.removeEventListener("visibilitychange", check);
+  }, [tracker, msgs, receipts]);
   const [query, setQuery] = useState("");
   const [newChat, setNewChat] = useState<null | { value: string; error?: string; busy?: boolean }>(null);
   const newChatBtn = useRef<HTMLButtonElement>(null);
@@ -312,6 +349,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                 <Avatar name={active.name} />
                 <div>
                   <h1 className="font-semibold">{active.nameKnown === false && <span aria-hidden="true">🔒 </span>}{active.name}</h1>
+                  {active.kind !== "group" && (() => { const l = formatLastSeen(Object.values(presence)[0], new Date(now)); return l ? <p data-testid="last-seen" className="text-xs text-slate-500">{l}</p> : null; })()}
                   <LockBadge />
                 </div>
               </div>
@@ -327,7 +365,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
               </div>
             )}
             {showInfo && active.kind === "group" && (
-              <MembersPanel adapter={adapter} conversationId={active.id} meId={userId}
+              <MembersPanel presence={presence} now={now} adapter={adapter} conversationId={active.id} meId={userId}
                 onLeft={() => { setConvos((s) => (s.state === "ready" ? { ...s, data: s.data.filter((c) => c.id !== active.id) } : s)); setActiveId(null); }}
                 onChanged={() => { refreshConvos(); loadMsgs(active.id); }} />
             )}
@@ -371,7 +409,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                               : <p className="whitespace-pre-wrap break-words text-sm">{m.text}</p>}
                             <p className={`mt-1 text-right text-[11px] ${m.fromMe ? "text-blue-100" : "text-slate-400"}`}>
                               {clockTime(m.sentAt)}
-                              {m.fromMe && <> <span data-status={m.status}>{STATUS_LABEL[m.status]}</span></>}
+                              {m.fromMe && <> <Ticks tick={tickState(m.status, rcpt.recipients, rcpt.byMessage[m.id])} /></>}
                               {m.fromMe && m.status === "failed" && m.clientId && (
                                 <button type="button" onClick={() => void send(m.text, m.clientId!)} className="ml-2 underline">Retry</button>
                               )}
