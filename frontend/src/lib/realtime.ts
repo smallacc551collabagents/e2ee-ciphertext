@@ -57,10 +57,11 @@ export function createRealtime(opts: { stream?: RealtimeStream | null; fastMs?: 
   };
 }
 
-type SyncWait = { changed: boolean; cursor: string; conversations: string[]; toDevice: boolean };
+type SyncWait = { changed: boolean; cursor: string; conversations: string[]; toDevice: boolean; delivered?: string[] };
 const isSyncWait = (x: unknown): x is SyncWait => {
   const o = x as SyncWait | null;
-  return !!o && typeof o.changed === "boolean" && typeof o.cursor === "string" && Array.isArray(o.conversations) && typeof o.toDevice === "boolean";
+  return !!o && typeof o.changed === "boolean" && typeof o.cursor === "string" && Array.isArray(o.conversations) && typeof o.toDevice === "boolean"
+    && (o.delivered === undefined || Array.isArray(o.delivered));
 };
 
 /**
@@ -98,18 +99,23 @@ export function createSyncWaitStream(opts: { guard?: () => void; fetchFn?: typeo
             if (!isSyncWait(body)) throw new Error("bad sync/wait body");
             errMs = 0;
             setUp(true);
-            cursor = body.cursor; // opaque (v2 since #80): always echo the last one as `since`
+            // Always adopt the cursor before looping. A v1/v2 `since` is answered immediately with a fresh
+            // v3 cursor; echoing that v3 is what stops the upgrade from tight-looping (the next call long-polls).
+            // An identical immediate reply (same cursor + same wakes) backs off below instead of spinning.
+            cursor = body.cursor;
+            const delivered = (body.delivered ?? []).filter((x): x is string => typeof x === "string");
             // First call (no `since`) returns everything pending at once; treat it like any other wake.
             if (!body.changed) { lastKey = ""; repeatMs = 0; continue; }
-            const key = `${[...body.conversations].sort().join(",")}|${body.toDevice}|${body.cursor}`;
+            const ids = [...new Set([...body.conversations.filter((x): x is string => typeof x === "string"), ...delivered])];
+            const key = `${[...ids].sort().join(",")}|${body.toDevice}|${cursor}`;
             if (key === lastKey) {
-              // Same pending set again (e.g. a message waiting for its key): don't spin, back off.
+              // Same pending set again (undecryptable message, or a repeated cursor-upgrade reply): don't spin.
               repeatMs = Math.min(maxMs, repeatMs ? repeatMs * 2 : minMs);
               await sleep(repeatMs);
               continue;
             }
             lastKey = key; repeatMs = 0;
-            if (body.conversations.length) body.conversations.forEach((id) => onEvent(id));
+            if (ids.length) ids.forEach((id) => onEvent(id));
             else onEvent();
             // Re-issue immediately: the echoed cursor already covers what we were just told, so the
             // server only wakes us for newer items. No delay after a fresh wake.

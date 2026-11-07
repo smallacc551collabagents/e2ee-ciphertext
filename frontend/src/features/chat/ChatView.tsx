@@ -3,17 +3,16 @@ import { onSessionEnd, bindTab, assertSameAccount } from "@/lib/session-guard";
 import { mergeThread } from "./mergeThread";
 import { coalesce, createRealtime, createSyncWaitStream } from "@/lib/realtime";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageStatus, type MessageView } from "./data";
+import { chatAdapter, FeatureUnavailableError, IdentityChangedError, NewDeviceRequiredError, type SafetyInfo, type ConversationView, type MessageView } from "./data";
 import { AttachmentView } from "./attachments/AttachmentView";
 import { AttachmentError, type Phase } from "./attachments/flow";
 import { changeKindLabel, identityWarning, NEW_DEVICE_COPY } from "./identityCopy";
 import { newChatErrorMessage, validatePeerUsername } from "./newChat";
 import { CreateGroupDialog, MembersPanel } from "./GroupPanels";
+import { nullReceipts, onReceiptsAdapterChange, receiptsAdapter, type ConversationReceipts, type ReceiptsAdapter } from "./receipts/adapter";
+import { foldReadReceipts, formatLastSeen, mergeReads, readTracker, tickState, type Presence, type ReadMarks, type ReadReceipt } from "./receipts/model";
+import { Ticks } from "./receipts/ui";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
-
-const STATUS_LABEL: Record<MessageStatus, string> = {
-  sending: "Sending…", sent: "✓ Sent", delivered: "✓✓ Delivered", read: "✓✓ Read", failed: "Failed",
-};
 
 type Load<T> = { state: "loading" } | { state: "ready"; data: T } | { state: "error" } | { state: "unavailable" };
 const toLoad = <T,>(e: unknown): Load<T> => (e instanceof FeatureUnavailableError ? { state: "unavailable" } : { state: "error" });
@@ -52,6 +51,66 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   const [convos, setConvos] = useState<Load<ConversationView[]>>({ state: "loading" });
   const [activeId, setActiveId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Load<MessageView[]>>({ state: "loading" });
+  // Start on the null adapter so SSR and hydration match; the effect picks up the live one.
+  const [receipts, setReceipts] = useState<ReceiptsAdapter>(nullReceipts);
+  useEffect(() => {
+    const sync = () => setReceipts(receiptsAdapter());
+    sync();
+    return onReceiptsAdapterChange(sync);
+  }, []);
+  const [rcpt, setRcpt] = useState<ConversationReceipts>({ recipients: [], byMessage: {} });
+  const [marks, setMarks] = useState<ReadMarks>({});
+  useEffect(() => {
+    let acc: ReadMarks = {};
+    return receipts.onReceipts((r: ReadReceipt[]) => { acc = foldReadReceipts(acc, r); setMarks(acc); });
+  }, [receipts]);
+  const [presence, setPresence] = useState<Record<string, Presence>>({});
+  const [now, setNow] = useState(() => Date.now());
+  const rcptGen = useRef(0);
+  const msgsRef = useRef(msgs);
+  msgsRef.current = msgs;
+  const refreshReceiptsRef = useRef<() => void>(() => undefined);
+  refreshReceiptsRef.current = () => {
+    const id = activeId;
+    if (!id || !receipts.available) return;
+    const s = msgsRef.current;
+    const own = s.state === "ready" ? s.data.flatMap((m) => (m.fromMe && !m.system && m.seq !== undefined ? [{ id: m.id, seq: m.seq }] : [])) : [];
+    const n = ++rcptGen.current;
+    receipts.receipts(id, own).then((r) => { if (n === rcptGen.current) setRcpt((p) => (Object.keys(r.byMessage).length === 0 && Object.keys(p.byMessage).length > 0 ? p : r)); }, () => undefined);
+    receipts.presence(id).then((p) => { if (n === rcptGen.current) setPresence(p); }, () => undefined);
+  };
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
+  // Receipts + last seen. Refresh on open, on a new read receipt, when the thread settles, and every 30s (presence
+  // doesn't wake /sync/wait). Empty byMessage never clobbers ticks already on screen.
+  useEffect(() => {
+    setRcpt({ recipients: [], byMessage: {} }); setPresence({});
+    if (!activeId || !receipts.available) return;
+    let live = true;
+    const load = () => { if (live) refreshReceiptsRef.current(); };
+    load();
+    const off = receipts.onReceipts((r) => { if (r.some((x) => x.conversationId === activeId)) load(); });
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 30_000);
+    return () => { live = false; off(); clearInterval(t); };
+  }, [activeId, receipts]);
+  useEffect(() => { if (msgs.state === "ready") refreshReceiptsRef.current(); }, [msgs.state, activeId, receipts]);
+  // Read trigger: chat open AND tab visible -> one E2EE receipt for the highest message seen (debounced).
+  // The tracker re-checks visibility at send time, so hiding the tab during the debounce does not emit.
+  const visible = () => typeof document !== "undefined" && document.visibilityState === "visible";
+  const tracker = useMemo(() => (activeId && receipts.available ? readTracker((seq) => receipts.sendRead(activeId, seq), 500, visible) : null), [activeId, receipts]);
+  useEffect(() => () => tracker?.cancel(), [tracker]);
+  useEffect(() => {
+    if (!tracker || !receipts.available || msgs.state !== "ready") return;
+    const check = () => {
+      if (!visible()) return;
+      const list = msgs.data; let idx = -1;
+      for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.fromMe && !list[i]!.system && list[i]!.seq !== undefined) { idx = i; break; }
+      if (idx >= 0) tracker.seen(list[idx]!.seq!);
+      else tracker.nudge();
+    };
+    check();
+    document.addEventListener("visibilitychange", check);
+    return () => document.removeEventListener("visibilitychange", check);
+  }, [tracker, msgs, receipts]);
   const [query, setQuery] = useState("");
   const [newChat, setNewChat] = useState<null | { value: string; error?: string; busy?: boolean }>(null);
   const newChatBtn = useRef<HTMLButtonElement>(null);
@@ -131,6 +190,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
     const unsub = bell.subscribe((e) => {
       if (e.conversationId && e.conversationId !== activeRef.current) { void pollList(); return; }
       void pollThread(); void pollList();
+      refreshReceiptsRef.current(); // delivered wakes have no new ciphertext; ticks still need a refresh
     });
     // Late sender key upgraded a group's forwarded sessions: re-fetch that thread so the badge clears without a wake.
     const unUp = adapter.onKeysUpgraded?.((gid) => { if (gid === activeRef.current) void pollThread(); void pollList(); }) ?? (() => undefined);
@@ -312,6 +372,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                 <Avatar name={active.name} />
                 <div>
                   <h1 className="font-semibold">{active.nameKnown === false && <span aria-hidden="true">🔒 </span>}{active.name}</h1>
+                  {active.kind !== "group" && (() => { const l = formatLastSeen(Object.values(presence)[0], new Date(now)); return l ? <p data-testid="last-seen" className="text-xs text-slate-500">{l}</p> : null; })()}
                   <LockBadge />
                 </div>
               </div>
@@ -327,7 +388,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
               </div>
             )}
             {showInfo && active.kind === "group" && (
-              <MembersPanel adapter={adapter} conversationId={active.id} meId={userId}
+              <MembersPanel presence={presence} now={now} adapter={adapter} conversationId={active.id} meId={userId}
                 onLeft={() => { setConvos((s) => (s.state === "ready" ? { ...s, data: s.data.filter((c) => c.id !== active.id) } : s)); setActiveId(null); }}
                 onChanged={() => { refreshConvos(); loadMsgs(active.id); }} />
             )}
@@ -371,7 +432,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
                               : <p className="whitespace-pre-wrap break-words text-sm">{m.text}</p>}
                             <p className={`mt-1 text-right text-[11px] ${m.fromMe ? "text-blue-100" : "text-slate-400"}`}>
                               {clockTime(m.sentAt)}
-                              {m.fromMe && <> <span data-status={m.status}>{STATUS_LABEL[m.status]}</span></>}
+                              {m.fromMe && <> <Ticks tick={tickState(m.status, rcpt.recipients, mergeReads(rcpt.byMessage[m.id], rcpt.recipients, activeId ? marks[activeId] : undefined, m.seq))} /></>}
                               {m.fromMe && m.status === "failed" && m.clientId && (
                                 <button type="button" onClick={() => void send(m.text, m.clientId!)} className="ml-2 underline">Retry</button>
                               )}

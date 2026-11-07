@@ -2,11 +2,11 @@
 // Every server row is keyed by its messageId, so a "Waiting for this message's key" placeholder is replaced in
 // place when that message decrypts (fresh carries it at the same seq). Only local, not-yet-acknowledged own sends
 // (optimistic rows) that the server list doesn't contain yet are kept, after the server rows.
-type Row = { id: string; clientId?: string; fromMe: boolean; status: string; text?: string; unverifiedSender?: boolean };
+type Row = { id: string; clientId?: string; fromMe: boolean; status: string; text?: string; unverifiedSender?: boolean; seq?: number };
 
-/** Fields that change what a row looks like. A keySource upgrade flips only `unverifiedSender`, and it must still re-render. */
+/** Fields that change what a row looks like. A keySource upgrade flips only `unverifiedSender`, and it must still re-render. Seq arms read receipts. */
 export function sameRow(a: Row, b: Row): boolean {
-  return a === b || (a.id === b.id && a.clientId === b.clientId && a.status === b.status && a.text === b.text && !!a.unverifiedSender === !!b.unverifiedSender);
+  return a === b || (a.id === b.id && a.clientId === b.clientId && a.status === b.status && a.text === b.text && !!a.unverifiedSender === !!b.unverifiedSender && a.seq === b.seq);
 }
 
 export function mergeThread<T extends Row>(current: readonly T[], fresh: readonly T[]): readonly T[] {

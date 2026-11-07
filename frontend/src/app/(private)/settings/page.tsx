@@ -1,6 +1,7 @@
 import { getSession } from "@/lib/api/server";
 import { LogoutButton } from "@/components/LogoutButton";
 import { DeleteAccount } from "@/components/DeleteAccount";
+import { LastSeenToggle } from "@/features/chat/receipts/ui";
 import { avatarColor, initials } from "@/features/chat/format";
 
 const NAV = ["Profile", "Privacy", "Devices", "Notifications", "Appearance"] as const;
@@ -45,6 +46,7 @@ export default async function SettingsPage() {
                 <input type="checkbox" role="switch" aria-label={p} disabled className="h-5 w-9 cursor-not-allowed" />
               </li>
             ))}
+            <LastSeenToggle />
           </ul>
         </section>
         <section id="devices" aria-labelledby="devices-h" className="rounded-2xl bg-white p-5 ring-1 ring-slate-200" data-testid="devices-coming-soon">
