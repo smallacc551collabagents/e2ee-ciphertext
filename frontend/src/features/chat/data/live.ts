@@ -292,8 +292,9 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
       if (r.receipts.length) publishReceipts(r.receipts);
       r.retry.forEach((x) => retry.add(x));
       await http.request("POST", "/to-device/ack", { ids: page.messages.map((m) => m.id) });
-      // Creator's reshare upgraded a forwarded session: refresh that group so keySources() clears the badge live.
-      upgrades.notify((r as { upgraded?: string[] }).upgraded);
+      // Room-key import (retry) and a forwarded-session upgrade both need the open thread re-fetched.
+      // A to-device wake does not change the conversation cursor, and retry used to be discarded.
+      upgrades.notify([...(r.upgraded ?? []), ...r.retry]);
       if (!page.hasMore) break;
     }
     return retry;
