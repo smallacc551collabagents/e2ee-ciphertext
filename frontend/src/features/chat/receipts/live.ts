@@ -4,7 +4,7 @@
 import { assertSameAccount, onSessionEnd } from "@/lib/session-guard";
 import { conversationListSchema, privacyResponseSchema, type ConversationWire } from "@e2ee/shared";
 import { nullReceipts, setReceiptsAdapter, type ConversationReceipts, type ReceiptsAdapter } from "./adapter";
-import { foldDelivered, foldReadReceipts, receiptsForMessages, type DeliveredMarks, type ReadMarks, type ReadReceipt } from "./model";
+import { asBigInt, foldDelivered, foldReadReceipts, receiptsForMessages, seqDigits, type DeliveredMarks, type ReadMarks, type ReadReceipt } from "./model";
 
 export interface ReceiptsBridge {
   sendReadReceipt(conversationId: string, upToSeq: string | number | bigint, authorUserIds: readonly string[]): Promise<unknown>;
@@ -71,17 +71,14 @@ export function startHeartbeat(opts: {
   return () => { stopped = true; clear(); unlisten(); };
 }
 
-function safeSeq(seq: string): number | undefined {
-  if (!SEQ.test(seq)) return undefined;
-  const n = BigInt(seq);
-  if (n > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
-  return Number(n);
+function safeSeq(seq: string): string | undefined {
+  return asBigInt(seq)?.toString();
 }
 
 function flatten(marks: ReadMarks): ReadReceipt[] {
   const out: ReadReceipt[] = [];
   for (const [conversationId, by] of Object.entries(marks)) for (const [fromUserId, m] of Object.entries(by)) {
-    if (m && Number.isFinite(m.upToSeq)) out.push({ conversationId, fromUserId, upToSeq: m.upToSeq, ts: m.ts });
+    if (m && asBigInt(m.upToSeq) !== undefined) out.push({ conversationId, fromUserId, upToSeq: m.upToSeq, ts: m.ts });
   }
   return out;
 }
@@ -155,16 +152,16 @@ export function createLiveReceipts(opts: {
     }
   }
 
-  function ownMessages(conversationId: string): { id: string; seq: number }[] {
+  function ownMessages(conversationId: string): { id: string; seq: string }[] {
     const live = bridge?.ownMessages(conversationId) ?? [];
     if (live.length) msgCache.set(conversationId, live);
     const rows = msgCache.get(conversationId) ?? [];
-    const out: { id: string; seq: number }[] = [];
+    const out: { id: string; seq: string }[] = [];
     for (const m of rows) { const seq = safeSeq(m.seq); if (seq !== undefined) out.push({ id: m.id, seq }); }
     return out;
   }
 
-  async function project(conversationId: string, own?: readonly { id: string; seq: number }[]): Promise<ConversationReceipts> {
+  async function project(conversationId: string, own?: readonly { id: string; seq: string }[]): Promise<ConversationReceipts> {
     const list = await listConversations(true);
     const conv = list?.find((c) => c.id === conversationId);
     if (!conv) return { recipients: [], byMessage: {} };
@@ -178,8 +175,8 @@ export function createLiveReceipts(opts: {
     }
     const next = foldDelivered(delivered, folded);
     if (next !== delivered) { delivered = next; persist(); }
-    const fromScreen = (own ?? []).filter((m) => Number.isSafeInteger(m.seq));
-    if (fromScreen.length) msgCache.set(conversationId, fromScreen.map((m) => ({ id: m.id, seq: String(m.seq) })));
+    const fromScreen = (own ?? []).flatMap((m) => { const seq = safeSeq(m.seq); return seq ? [{ id: m.id, seq }] : []; });
+    if (fromScreen.length) msgCache.set(conversationId, fromScreen);
     const messages = fromScreen.length ? fromScreen : ownMessages(conversationId);
     return { recipients, byMessage: receiptsForMessages(recipients, delivered[conversationId], reads[conversationId], messages) };
   }
@@ -187,7 +184,8 @@ export function createLiveReceipts(opts: {
   const adapter: ReceiptsAdapter = {
     available: true,
     async sendRead(conversationId, upToSeq) {
-      if (!bridge || !Number.isSafeInteger(upToSeq) || upToSeq < 0) throw Object.assign(new Error("receipts not ready"), { status: 503 });
+      const seq = seqDigits(upToSeq);
+      if (!bridge || seq === undefined) throw Object.assign(new Error("receipts not ready"), { status: 503 });
       const list = await listConversations();
       if (convosGone) return; // endpoint retired: stop retrying
       const conv = list?.find((c) => c.id === conversationId);
@@ -195,7 +193,7 @@ export function createLiveReceipts(opts: {
       const authors: string[] = [];
       for (const m of conv.members) if (m.id !== opts.me.id) authors.push(await libId(m.username));
       if (!authors.length) return;
-      try { await bridge.sendReadReceipt(conversationId, upToSeq, authors); }
+      try { await bridge.sendReadReceipt(conversationId, seq, authors); }
       catch (e) {
         if (statusOf(e) === 404) return; // to-device gone: stop retrying
         throw e;
@@ -252,9 +250,9 @@ export function createLiveReceipts(opts: {
     publish(incoming) {
       const mapped: ReadReceipt[] = [];
       for (const r of incoming) {
-        const n = typeof r.upToSeq === "number" ? r.upToSeq : Number(r.upToSeq);
-        if (!Number.isSafeInteger(n)) continue;
-        mapped.push({ conversationId: r.conversationId, fromUserId: r.fromUserId, upToSeq: n, ts: r.ts });
+        const seq = seqDigits(r.upToSeq);
+        if (seq === undefined) continue;
+        mapped.push({ conversationId: r.conversationId, fromUserId: r.fromUserId, upToSeq: seq, ts: r.ts });
       }
       const next = foldReadReceipts(reads, mapped);
       if (next === reads) return;
@@ -273,7 +271,8 @@ let sessionHooked = false;
 /** Install (or reuse) the live adapter for this account. Idempotent. No-op during SSR. */
 export function installLiveReceipts(me: { id: string; username: string }): void {
   if (typeof window === "undefined" || !me.id) return;
-  if (process.env.NEXT_PUBLIC_CHAT_FIXTURES === "1") return;
+  // Same gate as chatAdapter: fixtures never install the live adapter, and the switch is dead in production.
+  if (process.env.NODE_ENV !== "production" && process.env.NEXT_PUBLIC_CHAT_FIXTURES === "1") return;
   if (!current || current.meId !== me.id) {
     current?.stop();
     current = createLiveReceipts({ me, heartbeat: true });

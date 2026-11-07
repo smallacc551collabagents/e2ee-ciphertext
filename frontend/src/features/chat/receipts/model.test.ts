@@ -55,7 +55,7 @@ describe("readTracker", () => {
     t.seen(3); t.seen(5); t.seen(4);
     vi.advanceTimersByTime(100);
     t.seen(5); vi.advanceTimersByTime(100);
-    expect(send.mock.calls).toEqual([[5]]);
+    expect(send.mock.calls).toEqual([[5n]]);
     vi.useRealTimers();
   });
   it("does not send while the tab is hidden, then sends when it is visible", () => {
@@ -69,7 +69,7 @@ describe("readTracker", () => {
     allowed = true;
     t.nudge();
     vi.advanceTimersByTime(100);
-    expect(send.mock.calls).toEqual([[4]]);
+    expect(send.mock.calls).toEqual([[4n]]);
     vi.useRealTimers();
   });
   it("backs off when send fails instead of retrying immediately", () => {
@@ -94,7 +94,12 @@ describe("read receipts (E2EE, monotonic)", () => {
     const same = foldReadReceipts(m, [{ conversationId: "c", fromUserId: "b", upToSeq: 3, ts: 2 }, { conversationId: "c", fromUserId: "b", upToSeq: 5, ts: 2 }]);
     expect(same).toBe(m);
     m = foldReadReceipts(m, [{ conversationId: "c", fromUserId: "b", upToSeq: 7, ts: 3 }]);
-    expect(m.c!.b!.upToSeq).toBe(7);
+    expect(m.c!.b!.upToSeq).toBe("7");
+    // "10" < "9" as text; the fold must use numeric order.
+    const wide = foldReadReceipts({}, [{ conversationId: "c", fromUserId: "b", upToSeq: "9", ts: 1 }]);
+    expect(foldReadReceipts(wide, [{ conversationId: "c", fromUserId: "b", upToSeq: "10", ts: 2 }]).c!.b!.upToSeq).toBe("10");
+    const huge = "9007199254740993";
+    expect(foldReadReceipts({}, [{ conversationId: "c", fromUserId: "b", upToSeq: huge, ts: 1 }]).c!.b!.upToSeq).toBe(huge);
   });
   it("group goes blue only when every member's upToSeq covers the message", () => {
     const marks = foldReadReceipts({}, [{ conversationId: "g", fromUserId: "b", upToSeq: 10, ts: 1 }, { conversationId: "g", fromUserId: "c", upToSeq: 4, ts: 1 }]).g;
@@ -111,6 +116,10 @@ describe("delivered watermarks never move backwards", () => {
     expect(same).toBe(d);
     d = foldDelivered(d, [{ conversationId: "c", userId: "b", deliveredSeq: "9", deliveredAt: "t4" }]);
     expect(d.c!.b).toEqual({ seq: "9", at: "t4" });
+    const past = "9007199254740993"; // 2^53+1, not a safe integer
+    const hi = foldDelivered({}, [{ conversationId: "c", userId: "b", deliveredSeq: past, deliveredAt: "t" }]);
+    expect(foldDelivered(hi, [{ conversationId: "c", userId: "b", deliveredSeq: "9007199254740992", deliveredAt: "older" }])).toBe(hi);
+    expect(hi.c!.b!.seq).toBe(past);
   });
   it("group ticks: grey only when every member's watermark covers the message, blue only when every member has read", () => {
     const delivered = { b: { seq: "5", at: "d" }, c: { seq: "2", at: "d" } };
@@ -125,5 +134,9 @@ describe("delivered watermarks never move backwards", () => {
     const both = foldReadReceipts({}, [{ conversationId: "g", fromUserId: "b", upToSeq: 9, ts: 1 }, { conversationId: "g", fromUserId: "c", upToSeq: 4, ts: 2 }]).g;
     expect(tickState("sent", ["b", "c"], receiptsForMessages(["b", "c"], { b: { seq: "5", at: "d" }, c: { seq: "5", at: "d" } }, both, msgs).m4)).toBe("read");
     expect(tickState("sent", ["b", "c"], receiptsForMessages(["b", "c"], { b: { seq: "5", at: "d" }, c: { seq: "5", at: "d" } }, both, msgs).m2)).toBe("read");
+    const huge = "9007199254740993";
+    const rows = [{ id: "h", seq: huge }];
+    expect(tickState("sent", ["b"], receiptsForMessages(["b"], { b: { seq: "9007199254740992", at: "d" } }, undefined, rows).h)).toBe("sent");
+    expect(tickState("sent", ["b"], receiptsForMessages(["b"], { b: { seq: huge, at: "d" } }, undefined, rows).h)).toBe("delivered");
   });
 });
