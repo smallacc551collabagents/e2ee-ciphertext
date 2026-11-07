@@ -5,11 +5,24 @@ import { nullReceipts, onReceiptsAdapterChange, receiptsAdapter, type ReceiptsAd
 
 const LABEL: Record<Tick, string> = { none: "", pending: "Sending…", failed: "Failed", sent: "Sent", delivered: "Delivered", read: "Read" };
 
+/** WhatsApp msg-dblcheck: one path, second check offset right and overlapping the first. The path bounds are 16×15; it is drawn in a 16×11 slot. */
+function DoubleCheck() {
+  return (
+    <svg viewBox="0 0 16 15" width="16" height="11" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false" className="inline-block align-[-1px]">
+      <path fill="currentColor" d="M15.01 3.316l-.478-.372a.365.365 0 0 0-.51.063L8.666 9.879a.32.32 0 0 1-.484.033l-.358-.325a.319.319 0 0 0-.484.032l-.378.483a.418.418 0 0 0 .036.541l1.32 1.266c.143.14.361.125.484-.033l6.272-8.048a.366.366 0 0 0-.064-.512zm-4.1 0l-.478-.372a.365.365 0 0 0-.51.063L4.566 9.879a.32.32 0 0 1-.484.033L1.891 7.769a.366.366 0 0 0-.515.006l-.423.433a.364.364 0 0 0 .006.514l3.258 3.185c.143.14.361.125.484-.033l6.272-8.048a.365.365 0 0 0-.063-.51z" />
+    </svg>
+  );
+}
+
 export function Ticks({ tick }: { tick: Tick }) {
   if (tick === "none") return null;
   if (tick === "pending" || tick === "failed") return <span data-status={tick}>{LABEL[tick]}</span>;
-  const glyph = tick === "sent" ? "✓" : "✓✓";
-  return <span data-status={tick} data-testid="ticks" aria-label={LABEL[tick]} title={LABEL[tick]} className={tick === "read" ? "font-semibold text-sky-300" : "text-blue-100"}>{glyph}</span>;
+  const color = tick === "read" ? "text-[#53bdeb]" : tick === "delivered" ? "text-[#8696a0]" : "text-blue-100";
+  return (
+    <span data-status={tick} data-testid="ticks" aria-label={LABEL[tick]} title={LABEL[tick]} className={color}>
+      {tick === "sent" ? "✓" : <DoubleCheck />}
+    </span>
+  );
 }
 
 /** Settings > Privacy: "Last seen". Hiding yours also hides others' last seen from you. Disabled until backend lands. */
