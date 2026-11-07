@@ -2,7 +2,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { FakeGroupServer, member } from './group-fake.js';
-import { decodeGroupEnvelope, GROUPS_ENABLED, openHistoryStore, userIdFor, createGroupCrypto, openGroupStateStore } from '../src/index.js';
+import { decodeGroupEnvelope, GROUPS_ENABLED, openHistoryStore, userIdFor, createGroupCrypto, openGroupStateStore, type CiphertextEnvelope } from '../src/index.js';
 
 const G = 'grp-1';
 async function world(names = ['alice', 'bob', 'carol']) {
@@ -355,6 +355,32 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
       roomKeys: 1, retry: [G], second: ['one', 'two'],
     });
     expect(bob.groups.isWaiting(G)).toBe(false);
+  });
+
+  async function delayedRoomKey() {
+    const { s, m } = await world();
+    s.create(G, 'alice', ['bob', 'carol']);
+    await m.alice!.send(G, 'one');
+    await m.bob!.groups.receive(G, s.fetch(G, 'bob', '0'));
+    const env = s.drainToDevice('bob')[0];
+    if (!env) throw new Error('expected a queued room key');
+    return { bob: m.bob!, env };
+  }
+  const claim = (env: CiphertextEnvelope, sender: Partial<CiphertextEnvelope['sender']>): CiphertextEnvelope =>
+    ({ ...env, sender: { ...env.sender, ...sender } });
+
+  it('tampered sender user on a delayed room key is not accepted', async () => {
+    const { bob, env } = await delayedRoomKey();
+    const td = await bob.groups.receiveToDevice([claim(env, { userId: userIdFor('carol') })]);
+    expect(td.roomKeys).toBe(0);
+    expect(td.retry).toEqual([]);
+  });
+
+  it('delayed room key claimed for a different device id is not accepted', async () => {
+    const { bob, env } = await delayedRoomKey();
+    const td = await bob.groups.receiveToDevice([claim(env, { deviceId: 'NOT-ALICE' })]);
+    expect(td.roomKeys).toBe(0);
+    expect(td.retry).toEqual([]);
   });
 
   it('a held inbound session is not forwarded to a member added later', async () => {

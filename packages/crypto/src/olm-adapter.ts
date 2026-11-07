@@ -19,6 +19,7 @@ import {
 } from './contract.js';
 import { withLock } from './lock.js';
 import { getOrCreateStoreKey } from './store-key.js';
+import { acceptToDeviceSender } from './to-device-sender.js';
 import type { IdentityGate } from './peer-trust.js';
 import type { GroupPrimitives, GroupDecryptResult, GroupShareResult, ToDeviceResult } from './groups.js';
 
@@ -299,13 +300,18 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<OlmAdap
             const raw = JSON.parse(d.rawEvent) as { type?: string; sender?: string; content?: { body?: unknown; room_id?: unknown; session_id?: unknown } };
             const info = d.encryptionInfo;
             // senderDevice is unset for m.room_key while the library delays sender checks. The Megolm
-            // session is already imported; bind the claimed device by curve25519 before treating it as invalid.
-            let deviceOk = info.senderDevice?.toString() === env.sender.deviceId;
-            if (!deviceOk && !info.senderDevice && raw.sender === env.sender.userId) {
+            // session is already imported; bind the claimed device by curve25519 only in that case.
+            const senderDevice = info.senderDevice?.toString();
+            let publishedCurve25519: string | undefined;
+            if (senderDevice === undefined && raw.sender === env.sender.userId) {
               const dev = await machine.getDevice(new M.UserId(env.sender.userId), new M.DeviceId(env.sender.deviceId));
-              deviceOk = !!dev && dev.curve25519Key?.toBase64() === info.senderCurve25519Key;
+              publishedCurve25519 = dev?.curve25519Key?.toBase64();
             }
-            if (deviceOk && raw.sender === env.sender.userId) {
+            if (acceptToDeviceSender({
+              senderDevice, claimedDeviceId: env.sender.deviceId,
+              rawSender: typeof raw.sender === 'string' ? raw.sender : '', claimedUserId: env.sender.userId,
+              olmCurve25519: info.senderCurve25519Key, publishedCurve25519,
+            })) {
               if (raw.type === 'm.room_key') {
                 // Direct Olm share from the session's creator: report which group session it was.
                 const rm = typeof raw.content?.room_id === 'string' ? /^!(.+):e2ee\.local$/.exec(raw.content.room_id) : null;
