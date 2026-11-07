@@ -128,20 +128,19 @@ export function assertMayOpen(state: DeviceState, confirmed: boolean): void {
   if (state === "needs-new-device-confirmation" && !confirmed) throw new NewDeviceRequiredError();
 }
 
-/** Seq on the view drives read receipts. Skip values JS can't compare exactly. */
-function safeSeq(seq: string | bigint): number | undefined {
+/** Seq on the view is the wire decimal string. Compared later with BigInt, never via Number. */
+function digitSeq(seq: string | bigint): string | undefined {
   try {
-    const n = typeof seq === "bigint" ? seq : BigInt(seq);
-    if (n < 0n || n > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
-    return Number(n);
+    const s = typeof seq === "bigint" ? (seq < 0n ? "" : seq.toString()) : seq;
+    return /^\d{1,30}$/.test(s) ? s : undefined;
   } catch { return undefined; }
 }
 function withSeq(seq: bigint, view: MessageView): MessageView {
-  const n = safeSeq(seq);
+  const n = digitSeq(seq);
   return n === undefined || view.seq === n ? view : { ...view, seq: n };
 }
-function seqField(seq: string): { seq: number } | Record<string, never> {
-  const n = safeSeq(seq);
+function seqField(seq: string): { seq: string } | Record<string, never> {
+  const n = digitSeq(seq);
   return n === undefined ? {} : { seq: n };
 }
 

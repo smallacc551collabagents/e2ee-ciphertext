@@ -103,8 +103,8 @@ describe("live receipts", () => {
       ownMessages: () => [],
       sendReadReceipt: async (id, seq, authors) => { seen.push({ id, seq, authors }); },
     });
-    await live.adapter.sendRead("g1", 4);
-    expect(seen).toEqual([{ id: "g1", seq: 4, authors: [uid("bob"), uid("carol")] }]);
+    await live.adapter.sendRead("g1", "4");
+    expect(seen).toEqual([{ id: "g1", seq: "4", authors: [uid("bob"), uid("carol")] }]);
     live.stop();
   });
 

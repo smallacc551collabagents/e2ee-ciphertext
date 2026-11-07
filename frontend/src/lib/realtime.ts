@@ -61,8 +61,15 @@ type SyncWait = { changed: boolean; cursor: string; conversations: string[]; toD
 const isSyncWait = (x: unknown): x is SyncWait => {
   const o = x as SyncWait | null;
   return !!o && typeof o.changed === "boolean" && typeof o.cursor === "string" && Array.isArray(o.conversations) && typeof o.toDevice === "boolean"
-    && (o.delivered === undefined || Array.isArray(o.delivered));
+    && (o.delivered == null || Array.isArray(o.delivered));
 };
+
+/** Missing or null `delivered` is an empty wake list, not an error. */
+export function deliveredIds(delivered: unknown): string[] {
+  if (delivered == null) return [];
+  if (!Array.isArray(delivered)) return [];
+  return delivered.filter((x): x is string => typeof x === "string");
+}
 
 /**
  * GET /api/sync/wait (backend #78) long-poll as a RealtimeStream. Read-only doorbell: it never acks.
@@ -103,7 +110,7 @@ export function createSyncWaitStream(opts: { guard?: () => void; fetchFn?: typeo
             // v3 cursor; echoing that v3 is what stops the upgrade from tight-looping (the next call long-polls).
             // An identical immediate reply (same cursor + same wakes) backs off below instead of spinning.
             cursor = body.cursor;
-            const delivered = (body.delivered ?? []).filter((x): x is string => typeof x === "string");
+            const delivered = deliveredIds(body.delivered);
             // First call (no `since`) returns everything pending at once; treat it like any other wake.
             if (!body.changed) { lastKey = ""; repeatMs = 0; continue; }
             const ids = [...new Set([...body.conversations.filter((x): x is string => typeof x === "string"), ...delivered])];

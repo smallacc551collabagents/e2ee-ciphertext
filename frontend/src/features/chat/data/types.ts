@@ -23,8 +23,8 @@ export interface MessageView {
   text: string; // decrypted plaintext; rendered as text only, never HTML
   sentAt: string; // ISO
   status: MessageStatus;
-  /** Server sequence number, when known (read receipts carry the highest seen). */
-  seq?: number;
+  /** Server sequence as a decimal string (compared with BigInt; never a JS number). */
+  seq?: string;
   /** Untrusted attachment descriptor from inside the decrypted message (re-validated on open). */
   attachment?: unknown;
   /** Own message the server could not deliver: the recipient replaced its device. Re-sent automatically after acceptNewIdentity. */

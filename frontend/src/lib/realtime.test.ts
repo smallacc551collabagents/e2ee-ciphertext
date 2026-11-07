@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSyncWaitStream } from "./realtime";
+import { createSyncWaitStream, deliveredIds } from "./realtime";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -24,6 +24,12 @@ describe("sync/wait cursor", () => {
     expect(v2).toBe(1);
     expect(v3).toBe(1);
     expect(events).toEqual(["g", "g"]); // bootstrap conversation, then the delivered wake
+  });
+
+  it("treats a missing or null delivered list as []", () => {
+    expect(deliveredIds(undefined)).toEqual([]);
+    expect(deliveredIds(null)).toEqual([]);
+    expect(deliveredIds(["a", 1, "b"])).toEqual(["a", "b"]);
   });
 
   it("backs off when the same immediate wake repeats", async () => {

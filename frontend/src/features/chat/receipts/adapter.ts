@@ -8,10 +8,10 @@ export interface ConversationReceipts { recipients: string[]; byMessage: Record<
 
 export interface ReceiptsAdapter {
   /** Encrypt + send one read receipt for the highest message read (implemented via crypto sendReadReceipt). */
-  sendRead(conversationId: string, upToSeq: number): Promise<void>;
+  sendRead(conversationId: string, upToSeq: string | bigint): Promise<void>;
   /** Other members + per-recipient delivered/read for own messages, keyed by message id.
    *  `own` is the on-screen messages (id + seq). When passed, it wins over the in-memory thread. */
-  receipts(conversationId: string, own?: readonly { id: string; seq: number }[]): Promise<ConversationReceipts>;
+  receipts(conversationId: string, own?: readonly { id: string; seq: string }[]): Promise<ConversationReceipts>;
   /** Decrypted receipts from crypto receiveToDevice() ({conversationId, fromUserId, upToSeq, ts}); /sync/wait only wakes. */
   onReceipts(cb: (receipts: ReadReceipt[]) => void): () => void;
   /** Last seen keyed by username for the conversation's other members (empty if hidden/unknown). */
