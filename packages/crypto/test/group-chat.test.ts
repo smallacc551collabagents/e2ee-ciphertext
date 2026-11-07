@@ -329,6 +329,34 @@ describe('E2EE group chat (Megolm over Olm, E2EE-53)', () => {
     expect(s.toDevice.filter((t) => t.recipient === 'bob')).toEqual([]);
   });
 
+  it('two later messages decrypt after a delayed room-key import on the same open device', async () => {
+    const { s, m } = await world();
+    s.create(G, 'alice', ['bob', 'carol']);
+    await m.alice!.send(G, 'one');
+    await m.alice!.send(G, 'two');
+    const bob = m.bob!;
+    // Key envelopes stay queued (server holds them until /to-device ack). Do not reopen the device.
+    const first = await bob.groups.receive(G, s.fetch(G, 'bob', '0'));
+    const label = (x: any) => (x.kind === 'member_event' ? `event:${x.dto.seq}` : x.ok ? x.plaintext : x.code);
+    const labels = first.map(label);
+    const failAt = first.findIndex((x: any) => x.kind === 'message' && !x.ok);
+    expect(failAt).toBeGreaterThan(0);
+    expect(labels.slice(0, failAt).every((x: string) => x.startsWith('event:'))).toBe(true);
+    expect(labels.slice(failAt)).toEqual(['MISSING_ROOM_KEY', 'MISSING_ROOM_KEY']);
+    expect(bob.groups.isWaiting(G)).toBe(true);
+    // Same cursor the client keeps: ack the prefix, re-fetch only from the first waiting seq.
+    const ackedSeq = first[failAt - 1]!.dto.seq;
+    const pending = s.fetch(G, 'bob', ackedSeq);
+    expect(pending.map((x) => x.kind ?? 'message')).toEqual(['message', 'message']);
+
+    const td = await bob.groups.receiveToDevice(s.drainToDevice('bob'));
+    const second = await bob.groups.receive(G, pending);
+    expect({ roomKeys: td.roomKeys, retry: td.retry, second: second.map(label) }).toEqual({
+      roomKeys: 1, retry: [G], second: ['one', 'two'],
+    });
+    expect(bob.groups.isWaiting(G)).toBe(false);
+  });
+
   it('a held inbound session is not forwarded to a member added later', async () => {
     const { s, m } = await world(['alice', 'bob', 'carol', 'dave']);
     s.create(G, 'alice', ['bob', 'carol']);

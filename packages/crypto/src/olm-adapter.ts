@@ -297,7 +297,15 @@ export async function createOlmAdapter(opts: OlmAdapterOptions): Promise<OlmAdap
           if (r && r.type === M.ProcessedToDeviceEventType.Decrypted) {
             const d = r as M.DecryptedToDeviceEvent;
             const raw = JSON.parse(d.rawEvent) as { type?: string; sender?: string; content?: { body?: unknown; room_id?: unknown; session_id?: unknown } };
-            if (d.encryptionInfo.senderDevice?.toString() === env.sender.deviceId && raw.sender === env.sender.userId) {
+            const info = d.encryptionInfo;
+            // senderDevice is unset for m.room_key while the library delays sender checks. The Megolm
+            // session is already imported; bind the claimed device by curve25519 before treating it as invalid.
+            let deviceOk = info.senderDevice?.toString() === env.sender.deviceId;
+            if (!deviceOk && !info.senderDevice && raw.sender === env.sender.userId) {
+              const dev = await machine.getDevice(new M.UserId(env.sender.userId), new M.DeviceId(env.sender.deviceId));
+              deviceOk = !!dev && dev.curve25519Key?.toBase64() === info.senderCurve25519Key;
+            }
+            if (deviceOk && raw.sender === env.sender.userId) {
               if (raw.type === 'm.room_key') {
                 // Direct Olm share from the session's creator: report which group session it was.
                 const rm = typeof raw.content?.room_id === 'string' ? /^!(.+):e2ee\.local$/.exec(raw.content.room_id) : null;
