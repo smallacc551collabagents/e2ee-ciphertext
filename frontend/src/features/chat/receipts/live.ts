@@ -273,7 +273,8 @@ let sessionHooked = false;
 /** Install (or reuse) the live adapter for this account. Idempotent. No-op during SSR. */
 export function installLiveReceipts(me: { id: string; username: string }): void {
   if (typeof window === "undefined" || !me.id) return;
-  if (process.env.NEXT_PUBLIC_CHAT_FIXTURES === "1") return;
+  // Same gate as chatAdapter: fixtures never install the live adapter, and the switch is dead in production.
+  if (process.env.NODE_ENV !== "production" && process.env.NEXT_PUBLIC_CHAT_FIXTURES === "1") return;
   if (!current || current.meId !== me.id) {
     current?.stop();
     current = createLiveReceipts({ me, heartbeat: true });
