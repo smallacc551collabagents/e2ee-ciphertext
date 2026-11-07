@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { getSessionResult } from "@/lib/api/server";
 import { BackendUnavailable } from "@/components/BackendUnavailable";
 import { LogoutButton } from "@/components/LogoutButton";
+import { ReceiptsBoot } from "@/features/chat/receipts/ReceiptsBoot";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,7 @@ export default async function PrivateLayout({ children }: { children: ReactNode 
   const { user } = session;
   return (
     <div className="flex h-screen flex-col">
+      <ReceiptsBoot userId={user.id} username={user.username} />
       <header className="flex items-center justify-between border-b bg-white px-4 py-2">
         <Link href="/chat" className="font-semibold">Ciphertext</Link>
         <nav className="flex items-center gap-4 text-sm">

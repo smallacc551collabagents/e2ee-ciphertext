@@ -15,6 +15,7 @@ import { endSession, onSessionEnd } from "@/lib/session-guard";
 import { systemLine } from "../groupCopy";
 import { IdentityChangedError, NewDeviceRequiredError, type ChatAdapter, type DeviceState, type IdentityChangeKind, type PeerIdentityChange, type ConversationView, type GroupInfo, type MessageView, type SafetyInfo } from "./types";
 import { messageSchema, systemEventSchema, toDeviceListSchema, undeliverableListSchema, type ConversationWire, type MessageWire, type SystemEventWire } from "@e2ee/shared";
+import { bindReceiptsBridge, installLiveReceipts, publishReceipts } from "../receipts/live";
 
 export interface Me { id: string; username: string }
 
@@ -125,6 +126,23 @@ export function keyedSerial() {
 /** E2EE-79: opening the adapter (which publishes keys) is only allowed for fresh/existing devices or after explicit confirmation. */
 export function assertMayOpen(state: DeviceState, confirmed: boolean): void {
   if (state === "needs-new-device-confirmation" && !confirmed) throw new NewDeviceRequiredError();
+}
+
+/** Seq on the view drives read receipts. Skip values JS can't compare exactly. */
+function safeSeq(seq: string | bigint): number | undefined {
+  try {
+    const n = typeof seq === "bigint" ? seq : BigInt(seq);
+    if (n < 0n || n > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
+    return Number(n);
+  } catch { return undefined; }
+}
+function withSeq(seq: bigint, view: MessageView): MessageView {
+  const n = safeSeq(seq);
+  return n === undefined || view.seq === n ? view : { ...view, seq: n };
+}
+function seqField(seq: string): { seq: number } | Record<string, never> {
+  const n = safeSeq(seq);
+  return n === undefined ? {} : { seq: n };
 }
 
 export function liveAdapter(me: Me, injected?: HistoryStore): ChatAdapter {
@@ -240,6 +258,19 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
     }
     return gcInst;
   }
+  if (typeof window !== "undefined") {
+    installLiveReceipts(me);
+    bindReceiptsBridge({
+      sendReadReceipt: async (conversationId, upToSeq, authorUserIds) => (await gc()).sendReadReceipt(conversationId, upToSeq, authorUserIds),
+      ownMessages(conversationId) {
+        const thread = threads.get(conversationId);
+        if (!thread) return [];
+        const out: { id: string; seq: string }[] = [];
+        for (const e of thread.entries.values()) if (e.view.fromMe && !e.view.system) out.push({ id: e.view.id, seq: e.seq.toString() });
+        return out;
+      },
+    });
+  }
   async function refreshConvos() {
     const { conversations } = await chatApi.listConversations();
     const seen = new Set(conversations.map((v) => v.id));
@@ -259,6 +290,7 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
       const envs = [];
       for (const m of page.messages) { try { envs.push(c.decodeToDevice(m)); } catch { /* malformed: drop */ } }
       const r = await g.receiveToDevice(envs);
+      if (r.receipts.length) publishReceipts(r.receipts);
       r.retry.forEach((x) => retry.add(x));
       await http.request("POST", "/to-device/ack", { ids: page.messages.map((m) => m.id) });
       // Creator's reshare upgraded a forwarded session: refresh that group so keySources() clears the badge live.
@@ -322,8 +354,10 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
           throw e;
         });
       await texts.put(conversationId, message.seq, { id: message.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text, sentAt: message.createdAt, clientMsgId: clientId }).catch(() => undefined);
-      const view: MessageView = { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent" };
-      threads.get(conversationId)?.entries.set(message.id, { seq: BigInt(message.seq), view });
+      const view: MessageView = { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent", ...seqField(message.seq) };
+      const thread = threads.get(conversationId) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
+      threads.set(conversationId, thread);
+      thread.entries.set(message.id, { seq: BigInt(message.seq), view });
       return view;
     }
 
@@ -341,8 +375,10 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
     groupPending.set(gid, r.pending);
     const message = messageSchema.parse((r.message as { message?: unknown })?.message);
     await texts.put(gid, message.seq, { id: message.id, senderUserId: c.userIdFor(me.username), senderDeviceId: deviceIdFor(me.id), text, sentAt: message.createdAt, clientMsgId: clientId }).catch(() => undefined);
-    const view: MessageView = { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent" };
-    threads.get(gid)?.entries.set(message.id, { seq: BigInt(message.seq), view });
+    const view: MessageView = { id: message.id, clientId, fromMe: true, ...plaintextView(text, c.toDisplayText), sentAt: message.createdAt, status: "sent", ...seqField(message.seq) };
+    const thread = threads.get(gid) ?? { entries: new Map<string, { seq: bigint; view: MessageView }>() };
+    threads.set(gid, thread);
+    thread.entries.set(message.id, { seq: BigInt(message.seq), view });
     return view;
   }
 
@@ -444,7 +480,7 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
     for (const e of thread.entries.values()) {
       e.view = withBadge(e.view, forwarded);
     }
-    return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => e.view);
+    return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => withSeq(e.seq, e.view));
   }
 
   /**
@@ -517,7 +553,7 @@ type Thread = { entries: Map<string, { seq: bigint; view: MessageView }>; loaded
       if (e.view.fromMe && e.view.clientId && flagged.has(e.view.clientId)) e.view = { ...e.view, status: "failed", undeliverable: "recipient-changed-device" };
       else if (e.view.undeliverable && e.view.clientId && !flagged.has(e.view.clientId)) e.view = { ...e.view, status: "sent", undeliverable: undefined };
     }
-    return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => e.view);
+    return [...thread.entries.values()].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0)).map((e) => withSeq(e.seq, e.view));
   }
 
   return {

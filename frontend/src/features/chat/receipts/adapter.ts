@@ -1,7 +1,7 @@
-// Receipts/presence adapter. Read receipts are E2EE (crypto sendReadReceipt/decryptReceipt: Olm for 1:1,
-// Megolm for groups, one receipt per batch carrying the highest seq read (upToSeq, monotonic)). There is no /receipts/read.
-// Delivered-per-recipient and last seen come from the backend (existing acks; last-seen privacy toggle).
-// Until those land, nullReceipts is used: UI shows single tick and no last seen. No fake data.
+// Receipts/presence adapter. Read receipts are E2EE (crypto sendReadReceipt: Olm to each author's device,
+// one receipt per batch carrying the highest seq read). There is no /receipts/read.
+// Delivered watermarks and last seen come from GET /conversations; privacy from /me/privacy; heartbeat from
+// POST /presence/heartbeat. nullReceipts is the default until installLiveReceipts() (no fake ticks or last seen).
 import type { Presence, ReadReceipt, RecipientReceipt } from "./model";
 
 export interface ConversationReceipts { recipients: string[]; byMessage: Record<string, RecipientReceipt[]> }
@@ -9,8 +9,9 @@ export interface ConversationReceipts { recipients: string[]; byMessage: Record<
 export interface ReceiptsAdapter {
   /** Encrypt + send one read receipt for the highest message read (implemented via crypto sendReadReceipt). */
   sendRead(conversationId: string, upToSeq: number): Promise<void>;
-  /** Other members (recipients) + per-recipient delivered/read for own messages, keyed by message id. */
-  receipts(conversationId: string): Promise<ConversationReceipts>;
+  /** Other members + per-recipient delivered/read for own messages, keyed by message id.
+   *  `own` is the on-screen messages (id + seq). When passed, it wins over the in-memory thread. */
+  receipts(conversationId: string, own?: readonly { id: string; seq: number }[]): Promise<ConversationReceipts>;
   /** Decrypted receipts from crypto receiveToDevice() ({conversationId, fromUserId, upToSeq, ts}); /sync/wait only wakes. */
   onReceipts(cb: (receipts: ReadReceipt[]) => void): () => void;
   /** Last seen keyed by username for the conversation's other members (empty if hidden/unknown). */
@@ -33,6 +34,15 @@ export const nullReceipts: ReceiptsAdapter = {
 };
 
 let current: ReceiptsAdapter = nullReceipts;
+const waiters = new Set<() => void>();
 export const receiptsAdapter = () => current;
-/** Plug-in point for the live implementation once crypto + backend ship. */
-export function setReceiptsAdapter(a: ReceiptsAdapter) { current = a; }
+/** Plug-in point. Notifies subscribers so a late install (settings, hydration) is picked up. */
+export function setReceiptsAdapter(a: ReceiptsAdapter) {
+  if (a === current) return;
+  current = a;
+  for (const l of [...waiters]) l();
+}
+export function onReceiptsAdapterChange(cb: () => void): () => void {
+  waiters.add(cb);
+  return () => waiters.delete(cb);
+}

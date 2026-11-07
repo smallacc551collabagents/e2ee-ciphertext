@@ -9,8 +9,8 @@ import { AttachmentError, type Phase } from "./attachments/flow";
 import { changeKindLabel, identityWarning, NEW_DEVICE_COPY } from "./identityCopy";
 import { newChatErrorMessage, validatePeerUsername } from "./newChat";
 import { CreateGroupDialog, MembersPanel } from "./GroupPanels";
-import { receiptsAdapter, type ConversationReceipts } from "./receipts/adapter";
-import { foldReadReceipts, formatLastSeen, mergeReads, readTracker, tickState, type Presence, type ReadMarks } from "./receipts/model";
+import { nullReceipts, onReceiptsAdapterChange, receiptsAdapter, type ConversationReceipts, type ReceiptsAdapter } from "./receipts/adapter";
+import { foldReadReceipts, formatLastSeen, mergeReads, readTracker, tickState, type Presence, type ReadMarks, type ReadReceipt } from "./receipts/model";
 import { Ticks } from "./receipts/ui";
 import { avatarColor, clockTime, dayLabel, initials, listTime } from "./format";
 
@@ -51,36 +51,61 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
   const [convos, setConvos] = useState<Load<ConversationView[]>>({ state: "loading" });
   const [activeId, setActiveId] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Load<MessageView[]>>({ state: "loading" });
-  const receipts = receiptsAdapter();
+  // Start on the null adapter so SSR and hydration match; the effect picks up the live one.
+  const [receipts, setReceipts] = useState<ReceiptsAdapter>(nullReceipts);
+  useEffect(() => {
+    const sync = () => setReceipts(receiptsAdapter());
+    sync();
+    return onReceiptsAdapterChange(sync);
+  }, []);
   const [rcpt, setRcpt] = useState<ConversationReceipts>({ recipients: [], byMessage: {} });
   const [marks, setMarks] = useState<ReadMarks>({});
-  useEffect(() => receipts.onReceipts((r) => setMarks((m) => foldReadReceipts(m, r))), [receipts]);
+  useEffect(() => {
+    let acc: ReadMarks = {};
+    return receipts.onReceipts((r: ReadReceipt[]) => { acc = foldReadReceipts(acc, r); setMarks(acc); });
+  }, [receipts]);
   const [presence, setPresence] = useState<Record<string, Presence>>({});
   const [now, setNow] = useState(() => Date.now());
+  const rcptGen = useRef(0);
+  const msgsRef = useRef(msgs);
+  msgsRef.current = msgs;
+  const refreshReceiptsRef = useRef<() => void>(() => undefined);
+  refreshReceiptsRef.current = () => {
+    const id = activeId;
+    if (!id || !receipts.available) return;
+    const s = msgsRef.current;
+    const own = s.state === "ready" ? s.data.flatMap((m) => (m.fromMe && !m.system && m.seq !== undefined ? [{ id: m.id, seq: m.seq }] : [])) : [];
+    const n = ++rcptGen.current;
+    receipts.receipts(id, own).then((r) => { if (n === rcptGen.current) setRcpt((p) => (Object.keys(r.byMessage).length === 0 && Object.keys(p.byMessage).length > 0 ? p : r)); }, () => undefined);
+    receipts.presence(id).then((p) => { if (n === rcptGen.current) setPresence(p); }, () => undefined);
+  };
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(t); }, []);
-  // Receipts + last seen (empty until backend/crypto land: single tick, no last seen).
+  // Receipts + last seen. Refresh on open, on a new read receipt, when the thread settles, and every 30s (presence
+  // doesn't wake /sync/wait). Empty byMessage never clobbers ticks already on screen.
   useEffect(() => {
     setRcpt({ recipients: [], byMessage: {} }); setPresence({});
     if (!activeId || !receipts.available) return;
     let live = true;
-    const load = () => {
-      receipts.receipts(activeId).then((r) => { if (live) setRcpt(r); }, () => undefined);
-      receipts.presence(activeId).then((p) => { if (live) setPresence(p); }, () => undefined);
-    };
+    const load = () => { if (live) refreshReceiptsRef.current(); };
     load();
     const off = receipts.onReceipts((r) => { if (r.some((x) => x.conversationId === activeId)) load(); });
-    return () => { live = false; off(); };
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 30_000);
+    return () => { live = false; off(); clearInterval(t); };
   }, [activeId, receipts]);
+  useEffect(() => { if (msgs.state === "ready") refreshReceiptsRef.current(); }, [msgs.state, activeId, receipts]);
   // Read trigger: chat open AND tab visible -> one E2EE receipt for the highest message seen (debounced).
-  const tracker = useMemo(() => (activeId ? readTracker((seq) => { void receipts.sendRead(activeId, seq).catch(() => undefined); }) : null), [activeId, receipts]);
+  // The tracker re-checks visibility at send time, so hiding the tab during the debounce does not emit.
+  const visible = () => typeof document !== "undefined" && document.visibilityState === "visible";
+  const tracker = useMemo(() => (activeId && receipts.available ? readTracker((seq) => receipts.sendRead(activeId, seq), 500, visible) : null), [activeId, receipts]);
   useEffect(() => () => tracker?.cancel(), [tracker]);
   useEffect(() => {
     if (!tracker || !receipts.available || msgs.state !== "ready") return;
     const check = () => {
-      if (document.visibilityState !== "visible") return;
+      if (!visible()) return;
       const list = msgs.data; let idx = -1;
       for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.fromMe && !list[i]!.system && list[i]!.seq !== undefined) { idx = i; break; }
       if (idx >= 0) tracker.seen(list[idx]!.seq!);
+      else tracker.nudge();
     };
     check();
     document.addEventListener("visibilitychange", check);
@@ -165,6 +190,7 @@ export function ChatView({ username, userId = "" }: { username: string; userId?:
     const unsub = bell.subscribe((e) => {
       if (e.conversationId && e.conversationId !== activeRef.current) { void pollList(); return; }
       void pollThread(); void pollList();
+      refreshReceiptsRef.current(); // delivered wakes have no new ciphertext; ticks still need a refresh
     });
     // Late sender key upgraded a group's forwarded sessions: re-fetch that thread so the badge clears without a wake.
     const unUp = adapter.onKeysUpgraded?.((gid) => { if (gid === activeRef.current) void pollThread(); void pollList(); }) ?? (() => undefined);
