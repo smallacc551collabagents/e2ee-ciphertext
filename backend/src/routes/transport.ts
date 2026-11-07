@@ -9,6 +9,7 @@ import { normalizeUsername } from "../services/auth.js";
 import { overLimit } from "../utils/rateLimiter.js";
 import { shared } from "../utils/sharedSchema.js";
 import { membersOf } from "../services/groups.js";
+import { advanceDelivered, PRESENCE } from "../services/presence.js";
 import { deleteFullyAcked, RETENTION, sweepMessages } from "../services/retention.js";
 import {
   ackRequestSchema, CIPHERTEXT_MAX_BYTES, conversationParamsSchema, createConversationRequestSchema, KEY_MAX_BYTES,
@@ -245,15 +246,25 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/conversations", async (req) => {
-    const r = await q().query<{ id: string; kind: string; last_seq: string; created_at: Date; admin_id: string | null; membership_version: number; encrypted_meta: Buffer | null; members: { id: string; username: string }[] }>(
-      `SELECT c.id, c.kind, c.last_seq, c.created_at, c.admin_id, c.membership_version, c.encrypted_meta,
-              json_agg(json_build_object('id', u.id, 'username', u.username, 'joinedAt', to_char(m.joined_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) ORDER BY u.username) AS members
+    // Per member: deliveredSeq watermark (+deliveredAt) and presence. Presence is null if the member hides
+    // last seen OR the viewer does (reciprocal). Only members of conversations I'm in are ever listed.
+    const r = await q().query<{ id: string; kind: string; last_seq: string; created_at: Date; admin_id: string | null; membership_version: number; encrypted_meta: Buffer | null; members: { id: string; username: string; joinedAt: string; deliveredSeq: string; deliveredAt: string | null; presence: { online: boolean; lastSeenAt: string | null } | null }[] }>(
+      `WITH viewer AS (SELECT hide_last_seen FROM users WHERE id = $1)
+       SELECT c.id, c.kind, c.last_seq, c.created_at, c.admin_id, c.membership_version, c.encrypted_meta,
+              json_agg(json_build_object('id', u.id, 'username', u.username,
+                'joinedAt', to_char(m.joined_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'deliveredSeq', m.delivered_seq::text,
+                'deliveredAt', to_char(m.delivered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'presence', CASE WHEN u.id = $1 OR u.hide_last_seen OR (SELECT hide_last_seen FROM viewer) THEN NULL
+                  ELSE json_build_object('online', coalesce(u.last_seen_at > now() - make_interval(secs => $2), false),
+                    'lastSeenAt', to_char(u.last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) END
+              ) ORDER BY u.username) AS members
          FROM conversation_members mine
          JOIN conversations c ON c.id = mine.conversation_id
          JOIN conversation_members m ON m.conversation_id = c.id
          JOIN users u ON u.id = m.user_id
         WHERE mine.user_id = $1
-        GROUP BY c.id, c.kind, c.last_seq, c.created_at, c.admin_id, c.membership_version, c.encrypted_meta ORDER BY c.created_at DESC LIMIT 200`, [me(req).id]);
+        GROUP BY c.id, c.kind, c.last_seq, c.created_at, c.admin_id, c.membership_version, c.encrypted_meta ORDER BY c.created_at DESC LIMIT 200`, [me(req).id, PRESENCE.onlineSeconds]);
     return { conversations: r.rows.map((c) => ({
       id: c.id, kind: c.kind, lastSeq: String(c.last_seq), createdAt: new Date(c.created_at).toISOString(), members: c.members,
       ...(c.kind === "group" ? { adminId: c.admin_id, membershipVersion: c.membership_version, encryptedMeta: enc(c.encrypted_meta) } : {}),
@@ -359,10 +370,16 @@ export async function transportRoutes(app: FastifyInstance): Promise<void> {
     ...shared({ body: ackRequestSchema }),
   }, async (req) => {
     // Scoped to recipient_id = caller, so acking others' or unknown ids is a silent no-op.
+    const uid = me(req).id;
+    const convs = await q().query<{ c: string }>(
+      `SELECT DISTINCT m.conversation_id::text AS c FROM messages m JOIN message_deliveries d ON d.message_id = m.id
+        WHERE d.recipient_id = $1 AND m.id = ANY($2::uuid[])`, [uid, req.body.messageIds]);
     const r = await q().query(
       `UPDATE message_deliveries SET delivered_at = now() WHERE recipient_id = $1 AND message_id = ANY($2::uuid[]) AND delivered_at IS NULL
         AND (undeliverable_reason IS NULL OR message_id IN (SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'group'))`,
-      [me(req).id, req.body.messageIds]);
+      [uid, req.body.messageIds]);
+    // Delivery watermark (grey ticks) BEFORE retention deletes the rows; persisted on conversation_members.
+    try { await advanceDelivered(q(), uid, convs.rows.map((x) => x.c)); } catch (e) { app.log.error({ err: { name: (e as Error)?.name } }, "delivered watermark failed"); }
     // Retention: drop ciphertext as soon as every recipient has acked it.
     try { await deleteFullyAcked(req.body.messageIds); } catch (e) { app.log.error({ err: { name: (e as Error)?.name } }, "ack retention delete failed"); }
     await maybeSweep();
